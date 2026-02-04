@@ -3757,6 +3757,20 @@
       }
     };
 
+    function loadStoredSession(){
+      const storedToken = localStorage.getItem("sessionToken");
+      if (storedToken) API.token = storedToken;
+      const storedUser = localStorage.getItem("sessionUser");
+      if (storedUser) {
+        try{
+          API.user = JSON.parse(storedUser);
+        }catch{
+          API.user = null;
+        }
+      }
+    }
+
+
     function parseApiError(err){
       const msg = err?.message ? String(err.message) : String(err || "");
       const match = msg.match(/^(\d+):\s*(.*)$/s);
@@ -8657,6 +8671,7 @@
      **********************/
     async function boot(){
       applyTheme("auto");
+      loadStoredSession();
       // load templates early
       loadTemplates();
       rebuildTemplateSelect();
@@ -8695,12 +8710,27 @@
 
 
       try{
+        const initData = getTelegramInitData();
+        if (!initData){
+          throw new Error("Telegram initData is missing");
+        }
+        if (!API.token){
+          await API.authTelegram(initData);
+        }
+      }
         await API.ensureAuth();
         hideAuthGate();
       }catch(e){
         const parsed = parseApiError(e);
         const raw = parsed.detail || String(e?.message || "Авторизация не удалась.");
-        showAuthGate(raw, "Нет доступа");
+        if (/initData/i.test(raw)){
+          showAuthGate(
+            "Откройте приложение через Telegram, чтобы пройти авторизацию по Telegram ID.",
+            "Требуется Telegram"
+          );
+        } else {
+          showAuthGate(raw, "Нет доступа");
+        }
         return;
       }
 

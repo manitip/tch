@@ -2564,10 +2564,17 @@ def main_menu_kb(role: str) -> ReplyKeyboardMarkup:
     placeholder = "Выберите действие"
 
 
-    webapp_url = build_webapp_url()
+    normalized_role = (role or "").strip()
     buttons: List[List[KeyboardButton]] = []
-    if webapp_url:
-        buttons.append([KeyboardButton(text="Пройти авторизацию", web_app=WebAppInfo(url=webapp_url))])
+    if normalized_role == "cash_signer":
+        cashapp_url = cashapp_webapp_url()
+        if cashapp_url:
+            buttons.append([KeyboardButton(text="Подписать наличные", web_app=WebAppInfo(url=cashapp_url))])
+    else:
+        webapp_url = build_webapp_url()
+        if webapp_url:
+            label = "Открыть дашборд" if normalized_role in ("admin", "accountant", "viewer") else "Пройти авторизацию"
+            buttons.append([KeyboardButton(text=label, web_app=WebAppInfo(url=webapp_url))])
     return ReplyKeyboardMarkup(
         keyboard=buttons,
         resize_keyboard=True,
@@ -2602,8 +2609,8 @@ def reports_kb() -> InlineKeyboardMarkup:
         ]
     )
 
-    def webapp_url_with_screen(screen: str) -> Optional[str]:
-        return build_webapp_url(screen)
+def webapp_url_with_screen(screen: str) -> Optional[str]:
+    return build_webapp_url(screen)
 
 def parse_quick_input(text: str) -> Optional[Dict[str, Any]]:
     """
@@ -2747,9 +2754,10 @@ async def on_start(m: Message):
         register_bot_subscriber(tid)
 
 
+    role = get_user_role_from_db(tid)
     await m.answer(
         "Для входа в систему нажмите «Пройти авторизацию».",
-        reply_markup=main_menu_kb(""),
+        reply_markup=main_menu_kb(role),
     )
     webapp_url = build_webapp_url()
     if not webapp_url:
