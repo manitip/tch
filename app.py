@@ -1,6 +1,6 @@
 # app.py
 # FastAPI API + планировщик отчётов + aiogram bot (единое приложение)
-# По ТЗ: SQLite, allowlist (users.json), роли, Telegram WebApp auth (initData), расчёты как Excel.
+# По ТЗ: SQLite, allowlist (users.json), роли, magic-link auth, расчёты как Excel.
 
 from __future__ import annotations
 
@@ -1593,61 +1593,6 @@ def verify_session_token(token: str, secret: str) -> Dict[str, Any]:
     return payload
 
 
-# ---------------------------
-# Telegram WebApp initData validation
-# ---------------------------
-
-def validate_telegram_init_data(init_data: str, bot_token: str, max_age_sec: int = 7 * 24 * 3600) -> Dict[str, Any]:
-    """
-    Telegram WebApp initData verification:
-    - Parse query string
-    - Exclude 'hash'
-    - data_check_string = '\n'.join(sorted([f"{k}={v}"]))
-    - secret_key = HMAC_SHA256(key=b"WebAppData", msg=bot_token)
-    - check_hash = HMAC_SHA256(key=secret_key, msg=data_check_string).hexdigest()
-    """
-    if not init_data:
-        raise HTTPException(status_code=400, detail="initData is required")
-
-    parsed = dict(urllib.parse.parse_qsl(init_data, keep_blank_values=True))
-    received_hash = parsed.get("hash")
-    if not received_hash:
-        raise HTTPException(status_code=401, detail="Missing hash in initData")
-
-    # auth_date freshness (optional but recommended)
-    try:
-        auth_date = int(parsed.get("auth_date", "0"))
-        if auth_date and (int(time.time()) - auth_date) > max_age_sec:
-            raise HTTPException(status_code=401, detail="initData is too old")
-    except ValueError:
-        pass
-
-    data_pairs = []
-    for k, v in parsed.items():
-        if k == "hash":
-            continue
-        data_pairs.append(f"{k}={v}")
-    data_pairs.sort()
-    data_check_string = "\n".join(data_pairs)
-
-    secret_key = hmac.new(b"WebAppData", bot_token.encode("utf-8"), hashlib.sha256).digest()
-    computed_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
-
-    if not hmac.compare_digest(computed_hash, received_hash):
-        raise HTTPException(status_code=401, detail="initData validation failed")
-
-    # Extract user (JSON string)
-    user_raw = parsed.get("user")
-    if not user_raw:
-        raise HTTPException(status_code=401, detail="No user in initData")
-
-    try:
-        user_obj = json.loads(user_raw)
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid user payload in initData")
-
-    return user_obj
-
 
 # ---------------------------
 # Domain calculations (Excel logic)
@@ -2362,9 +2307,6 @@ def log_message_delivery(
 # ---------------------------
 # API Auth + roles
 # ---------------------------
-
-class AuthTelegramIn(BaseModel):
-    initData: str = Field(..., description="Telegram WebApp initData string")
 
 
 class AuthOut(BaseModel):
@@ -3951,18 +3893,7 @@ def favicon():
 # Auth
 # ---------------------------
 
-@APP.post("/api/auth/telegram", response_model=AuthOut)
-def auth_telegram(body: AuthTelegramIn, request: Request):
-    payload = validate_telegram_init_data(body.initData, CFG.BOT_TOKEN)
-    user = payload.get("user") or {}
-    telegram_id = int(user.get("id") or 0)
-    if not telegram_id:
-        log_auth_event("telegram", "unknown", request, "fail", "missing_telegram_id")
-        raise HTTPException(status_code=400, detail="Telegram user id is required")
 
-    row = _get_auth_user_from_allowlist(telegram_id, request)
-    log_auth_event("telegram", f"tg_{telegram_id}", request, "success", user_id=int(row["id"]))
-    return make_auth_response(row)
 
 @APP.post("/api/auth/magic/create")
 def auth_magic_create(body: MagicCreateIn, request: Request):
