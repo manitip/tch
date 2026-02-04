@@ -3749,19 +3749,19 @@ def auth_login(body: AuthLoginIn, request: Request):
             """
             INSERT INTO users (telegram_id, login, password_hash, name, team, role, active, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
-            """,
-            (
-                next_virtual_telegram_id(),
-                login,
-                hash_password(body.password),
-                body.name,
-                body.team,
-                "admin",
-                1,
-                now,
-                now,
-            ),
+        """
+        admin_params = (
+            next_virtual_telegram_id(),
+            login,
+            hash_password(body.password),
+            body.name,
+            body.team,
+            "admin",
+            1,
+            now,
+            now,
         )
+        new_id = db_exec_returning_id(admin_sql, admin_params)
         row = db_fetchone("SELECT * FROM users WHERE id=?;", (new_id,))
         if not row:
             log_auth_event("register", login, request, "fail", "admin_create_failed")
