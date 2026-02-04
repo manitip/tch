@@ -3742,6 +3742,10 @@ def auth_login(body: AuthLoginIn, request: Request):
         now = iso_now(CFG.tzinfo())
         if not admin_exists():
             new_id = db_exec_returning_id(
+
+        now = iso_now(CFG.tzinfo())
+        if not admin_exists():
+            new_id = db_exec_returning_id(
             """
             INSERT INTO users (telegram_id, login, password_hash, name, team, role, active, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
