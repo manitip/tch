@@ -741,15 +741,25 @@
       if (ThemeState.mode === "auto") applyTheme("auto");
     });
 
+    function getRawQueryParam(raw, key){
+      if (!raw) return "";
+      const trimmed = raw.replace(/^[?#]/, "");
+      if (!trimmed) return "";
+      const needle = `${encodeURIComponent(key)}=`;
+      const start = trimmed.indexOf(needle);
+      if (start === -1) return "";
+      const valueStart = start + needle.length;
+      const end = trimmed.indexOf("&", valueStart);
+      return end === -1 ? trimmed.slice(valueStart) : trimmed.slice(valueStart, end);
+    }
+
+
     function getInitDataFromUrl(){
       try{
-        const searchParams = new URLSearchParams(location.search || "");
-        const fromSearch = searchParams.get("tgWebAppData");
+        const fromSearch = getRawQueryParam(location.search || "", "tgWebAppData");
         if (fromSearch) return fromSearch;
-        const hash = (location.hash || "").replace(/^#/, "");
-        if (!hash) return "";
-        const hashParams = new URLSearchParams(hash);
-        return hashParams.get("tgWebAppData") || "";
+        const fromHash = getRawQueryParam(location.hash || "", "tgWebAppData");
+        return fromHash || "";
       }catch{
         return "";
       }
