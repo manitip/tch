@@ -637,13 +637,15 @@
     /**********************
      * Telegram + Theme (как в основном WebApp)
      **********************/
-    const tg = window.Telegram?.WebApp;
+    function getTelegramWebApp(){
+      return window.Telegram?.WebApp || null;
+    }
     const ThemeState = {
       mode: "auto", // auto|dark|light
       media: window.matchMedia?.("(prefers-color-scheme: dark)")
     };
 
-    const tgThemeParams = tg?.themeParams || {};
+    const tgThemeParams = getTelegramWebApp()?.themeParams || {};
 
     function detectTelegramTheme(){
       try{
@@ -729,9 +731,10 @@
     }
 
     // ВАЖНО: готовим Telegram WebApp (без этого часто нет initData/объекта)
-    if (tg){
-      try{ tg.ready(); }catch{}
-      try{ tg.expand(); }catch{}
+    const tgApp = getTelegramWebApp();
+    if (tgApp){
+      try{ tgApp.ready(); }catch{}
+      try{ tgApp.expand(); }catch{}
     }
 
     ThemeState.media?.addEventListener?.("change", ()=>{
@@ -753,7 +756,8 @@
     }
 
     function getTelegramInitData(){
-      return tg?.initData || getInitDataFromUrl();
+      const liveTg = getTelegramWebApp();
+      return liveTg?.initData || getInitDataFromUrl();
     }
 
     /**********************
@@ -1299,6 +1303,14 @@
       return me;
     }
 
+    function loadStoredToken(){
+      const storedToken = localStorage.getItem("cashapp_token");
+      if (storedToken){
+        API.token = storedToken;
+      }
+    }
+
+
     function toggleAuthCard(show, message){
       const card = $("authCard");
       if (!card) return;
@@ -1310,16 +1322,18 @@
 
     async function ensureAuth(){
       const initData = getTelegramInitData();
-      if (!initData){
+      if (!initData && !API.token){
         toggleAuthCard(true, "Откройте приложение через Telegram, чтобы пройти авторизацию.");
         setStatus("Нет Telegram initData", "error");
         return false;
       }
       try{
         setStatus("Авторизация…");
-        const res = await API.post("/api/auth/telegram", { initData });
-        if (res?.token) API.setToken(res.token);
-        if (res?.user) applyUser(res.user);
+        if (initData && !API.token){
+          const res = await API.post("/api/auth/telegram", { initData });
+          if (res?.token) API.setToken(res.token);
+          if (res?.user) applyUser(res.user);
+        }
         await loadMe();
         toggleAuthCard(false);
         return true;
@@ -1361,6 +1375,7 @@
     (async function init(){
       initTheme();
       Pad.init();
+      loadStoredToken();
 
       State.dropdowns.account = makeDropdown("accountSel", "accountLabel");
       State.dropdowns.scope = makeDropdown("scopeSel", "scopeLabel");

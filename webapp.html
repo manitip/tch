@@ -3527,14 +3527,16 @@
     /**********************
      * Telegram init + theme
      **********************/
-    const tg = window.Telegram?.WebApp;
+    function getTelegramWebApp(){
+      return window.Telegram?.WebApp || null;
+    }
     const ThemeState = {
       mode: "auto",
       media: window.matchMedia?.("(prefers-color-scheme: dark)")
     };
 
     function detectTelegramTheme(){
-      const p = tg?.themeParams || {};
+      const p = getTelegramWebApp()?.themeParams || {};
       if (!p.bg_color) return null;
       const hex = p.bg_color.replace("#","");
       if (hex.length !== 6) return null;
@@ -3545,7 +3547,7 @@
       return (lum > 180) ? "light" : "dark";
     }
 
-    const tgThemeParams = tg?.themeParams || {};
+    const tgThemeParams = getTelegramWebApp()?.themeParams || {};
 
     function applyTelegramThemeVars(theme){
       const root = document.documentElement.style;
@@ -3582,9 +3584,10 @@
       applyTelegramThemeVars(theme);
     }
 
-    if (tg) {
-      tg.ready();
-      tg.expand();
+    const tgApp = getTelegramWebApp();
+    if (tgApp) {
+      tgApp.ready();
+      tgApp.expand();
     }
 
     ThemeState.media?.addEventListener?.("change", ()=>{
@@ -3621,11 +3624,12 @@
     }
 
     function getTelegramInitData(){
-      return tg?.initData || getInitDataFromUrl();
+      const liveTg = getTelegramWebApp();
+      return liveTg?.initData || getInitDataFromUrl();
     }
 
     function getTelegramUserId(){
-      const directId = tg?.initDataUnsafe?.user?.id;
+      const directId = getTelegramWebApp()?.initDataUnsafe?.user?.id;
       if (directId) return Number(directId);
       const initData = getInitDataFromUrl();
       if (!initData) return null;
@@ -3688,7 +3692,7 @@
       async ensureAuth(){
         const telegramUserId = getTelegramUserId();
         const initData = getTelegramInitData();
-        if (!initData) {
+        if (!initData && !API.token) {
           throw new Error("Telegram initData is missing");
         }
         if (telegramUserId && API.user?.telegram_id && Number(API.user.telegram_id) !== telegramUserId) {
@@ -8025,8 +8029,9 @@
         if (!u.searchParams.has("token")) u.searchParams.set("token", token);
         return u.toString();
       })() : url;
-      if (tg?.openLink){
-        tg.openLink(finalUrl);
+      const tgApp = getTelegramWebApp();
+      if (tgApp?.openLink){
+        tgApp.openLink(finalUrl);
       } else {
         window.open(finalUrl, "_blank");
       }
@@ -8711,13 +8716,13 @@
 
       try{
         const initData = getTelegramInitData();
-        if (!initData){
+        if (!initData && !API.token){
           throw new Error("Telegram initData is missing");
         }
-        if (!API.token){
+        if (initData && !API.token){
           await API.authTelegram(initData);
         }
-      }
+
         await API.ensureAuth();
         hideAuthGate();
       }catch(e){
