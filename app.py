@@ -96,6 +96,8 @@ class Config:
     DB_PATH: str
     USERS_JSON_PATH: str
     SESSION_SECRET: str
+    MAGIC_LINK_SECRET: str
+    MAGIC_LINK_TTL: int
     TZ: str
 
     def tzinfo(self) -> ZoneInfo:
@@ -126,6 +128,8 @@ def load_config() -> Config:
         DB_PATH=db_path,
         USERS_JSON_PATH=users_json_path,
         SESSION_SECRET=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)).strip(),
+        MAGIC_LINK_SECRET=os.getenv("MAGIC_LINK_SECRET", os.getenv("SESSION_SECRET", "")).strip(),
+        MAGIC_LINK_TTL=int(os.getenv("MAGIC_LINK_TTL", "120").strip() or "120"),
         TZ=os.getenv("TIMEZONE", "Europe/Warsaw").strip(),
     )
 
@@ -364,6 +368,23 @@ def init_db() -> None:
             reviewed_by_user_id INTEGER,
             UNIQUE(login),
             FOREIGN KEY (reviewed_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+        );
+        """
+    )
+    db_exec(
+        """
+        CREATE TABLE IF NOT EXISTS magic_links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token_hash TEXT UNIQUE NOT NULL,
+            user_id INTEGER NOT NULL,
+            telegram_id INTEGER,
+            target_app TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            used_at TEXT,
+            created_at TEXT NOT NULL,
+            created_ip TEXT,
+            ua TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         );
         """
     )
@@ -2344,6 +2365,11 @@ class AuthOut(BaseModel):
     token: str
     user: Dict[str, Any]
 
+
+class MagicCreateIn(BaseModel):
+    telegram_id: int
+    target_app: str
+
 def _get_auth_user_from_allowlist(telegram_id: int, request: Optional[Request]) -> sqlite3.Row:
     allow = refresh_allowlist_if_needed()
     allow_user = allow.get(int(telegram_id))
@@ -2369,6 +2395,66 @@ def get_bearer_token(request: Request) -> str:
             return token
         raise HTTPException(status_code=401, detail="Missing Authorization Bearer token")
     return h.split(" ", 1)[1].strip()
+
+
+def clamp_magic_ttl(value: int) -> int:
+    return max(60, min(180, int(value)))
+
+
+def mask_token(token: str) -> str:
+    if not token:
+        return "****"
+    if len(token) <= 8:
+        return "****"
+    return f"{token[:4]}****{token[-4:]}"
+
+
+def hash_magic_token(token: str) -> str:
+    secret = CFG.MAGIC_LINK_SECRET or CFG.SESSION_SECRET
+    return hmac.new(secret.encode("utf-8"), token.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def get_magic_login_token(request: Request) -> str:
+    h = request.headers.get("Authorization", "").strip()
+    if h.lower().startswith("bearer "):
+        return h.split(" ", 1)[1].strip()
+    token = request.query_params.get("token", "").strip()
+    if token:
+        return token
+    raise HTTPException(status_code=401, detail="invalid_token")
+
+
+def get_magic_target_roles(target_app: str) -> Tuple[str, ...]:
+    target = (target_app or "").strip().lower()
+    if target == "webapp":
+        return ("admin", "accountant", "viewer")
+    if target == "cashapp":
+        return ("cash_signer", "admin")
+    raise HTTPException(status_code=400, detail="invalid_target_app")
+
+
+def build_magic_link_url(target_app: str) -> Optional[str]:
+    target = (target_app or "").strip().lower()
+    if target == "cashapp":
+        url = cashapp_webapp_url()
+        if url:
+            return url
+        return f"{CFG.APP_URL.rstrip('/')}/cashapp"
+    if target == "webapp":
+        url = build_webapp_url()
+        if url:
+            return url
+        return CFG.WEBAPP_URL or f"{CFG.APP_URL.rstrip('/')}/webapp"
+    return None
+
+
+def append_magic_token(url: str, token: str) -> str:
+    parsed = urllib.parse.urlparse(url)
+    query = urllib.parse.parse_qs(parsed.query)
+    query["token"] = [token]
+    new_query = urllib.parse.urlencode(query, doseq=True)
+    return urllib.parse.urlunparse(parsed._replace(query=new_query))
+
 
 
 def get_current_user(request: Request) -> sqlite3.Row:
@@ -2415,6 +2501,107 @@ def make_auth_response(row: sqlite3.Row) -> Dict[str, Any]:
         },
     }
 
+def create_magic_login_token(
+    *,
+    telegram_id: int,
+    target_app: str,
+    request: Optional[Request],
+) -> Tuple[str, int]:
+    target_roles = get_magic_target_roles(target_app)
+    row = _get_auth_user_from_allowlist(int(telegram_id), request)
+    role = str(row["role"])
+    if role not in target_roles:
+        log_auth_event("magic_create", f"tg_{telegram_id}", request, "fail", "insufficient_role")
+        raise HTTPException(status_code=403, detail="insufficient_role")
+
+    ttl = clamp_magic_ttl(CFG.MAGIC_LINK_TTL)
+    tz = CFG.tzinfo()
+    now = iso_now(tz)
+    expires_at = (dt.datetime.now(tz) + dt.timedelta(seconds=ttl)).isoformat()
+    token = secrets.token_urlsafe(24)
+    token_hash = hash_magic_token(token)
+    created_ip = request.client.host if request and request.client else None
+    ua = request.headers.get("user-agent") if request else None
+
+    for _ in range(3):
+        try:
+            db_exec(
+                """
+                INSERT INTO magic_links (
+                    token_hash, user_id, telegram_id, target_app,
+                    expires_at, used_at, created_at, created_ip, ua
+                )
+                VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?);
+                """,
+                (
+                    token_hash,
+                    int(row["id"]),
+                    int(telegram_id),
+                    target_app,
+                    expires_at,
+                    now,
+                    created_ip,
+                    ua,
+                ),
+            )
+            log_auth_event(
+                "magic_create",
+                f"tg_{telegram_id}",
+                request,
+                "success",
+                detail=f"token={mask_token(token)}",
+                user_id=int(row["id"]),
+            )
+            return token, ttl
+        except sqlite3.IntegrityError:
+            token = secrets.token_urlsafe(24)
+            token_hash = hash_magic_token(token)
+
+    log_auth_event("magic_create", f"tg_{telegram_id}", request, "fail", "token_collision")
+    raise HTTPException(status_code=500, detail="token_generation_failed")
+
+
+def exchange_magic_login_token(login_token: str, request: Optional[Request]) -> Dict[str, Any]:
+    token_hash = hash_magic_token(login_token)
+    row = db_fetchone("SELECT * FROM magic_links WHERE token_hash=?;", (token_hash,))
+    if not row:
+        log_auth_event("magic_exchange", "unknown", request, "fail", "invalid_token")
+        raise HTTPException(status_code=401, detail="invalid_token")
+    if row["used_at"]:
+        log_auth_event("magic_exchange", "unknown", request, "fail", "used_token")
+        raise HTTPException(status_code=401, detail="used_token")
+    expires_at = row["expires_at"]
+    try:
+        expires_dt = dt.datetime.fromisoformat(str(expires_at))
+    except Exception:
+        expires_dt = dt.datetime.min.replace(tzinfo=CFG.tzinfo())
+    if dt.datetime.now(CFG.tzinfo()) > expires_dt:
+        log_auth_event("magic_exchange", "unknown", request, "fail", "expired_token")
+        raise HTTPException(status_code=401, detail="expired_token")
+
+    user = db_fetchone("SELECT * FROM users WHERE id=?;", (int(row["user_id"]),))
+    if not user or int(user["active"]) != 1:
+        log_auth_event("magic_exchange", "unknown", request, "fail", "user_inactive")
+        raise HTTPException(status_code=403, detail="user_inactive")
+
+    target_roles = get_magic_target_roles(str(row["target_app"]))
+    if str(user["role"]) not in target_roles:
+        log_auth_event("magic_exchange", "unknown", request, "fail", "insufficient_role")
+        raise HTTPException(status_code=403, detail="insufficient_role")
+
+    now = iso_now(CFG.tzinfo())
+    db_exec("UPDATE magic_links SET used_at=? WHERE id=?;", (now, int(row["id"])))
+    log_auth_event(
+        "magic_exchange",
+        f"tg_{user['telegram_id']}",
+        request,
+        "success",
+        detail=f"token={mask_token(login_token)}",
+        user_id=int(user["id"]),
+    )
+    return make_auth_response(user)
+
+
 
 def require_role(*allowed_roles: str):
     def _dep(u: sqlite3.Row = Depends(get_current_user)) -> sqlite3.Row:
@@ -2454,6 +2641,18 @@ def log_auth_event(
         log_system_log(level, "auth", message, details=details)
     except Exception:
         pass
+
+def require_magic_create_secret(request: Request) -> None:
+    expected = CFG.MAGIC_LINK_SECRET
+    if not expected:
+        raise HTTPException(status_code=500, detail="magic_secret_not_configured")
+    provided = (
+        request.headers.get("x-magic-secret")
+        or request.headers.get("x-api-key")
+        or ""
+    ).strip()
+    if not provided or not hmac.compare_digest(provided, expected):
+        raise HTTPException(status_code=401, detail="invalid_magic_secret")
 
 
 
@@ -2575,6 +2774,8 @@ def main_menu_kb(role: str) -> ReplyKeyboardMarkup:
         if webapp_url:
             label = "Открыть дашборд" if normalized_role in ("admin", "accountant", "viewer") else "Пройти авторизацию"
             buttons.append([KeyboardButton(text=label, web_app=WebAppInfo(url=webapp_url))])
+    if normalized_role in ("admin", "accountant", "viewer", "cash_signer"):
+        buttons.append([KeyboardButton(text="Войти по ссылке")])
     return ReplyKeyboardMarkup(
         keyboard=buttons,
         resize_keyboard=True,
@@ -2811,6 +3012,31 @@ async def on_text(m: Message):
         )
         return
 
+    if text == "Войти по ссылке":
+        target_app = "cashapp" if role == "cash_signer" else "webapp"
+        try:
+            token, ttl = create_magic_login_token(
+                telegram_id=int(tid),
+                target_app=target_app,
+                request=None,
+            )
+        except HTTPException as exc:
+            await m.answer(f"Ошибка: {exc.detail}")
+            return
+        base_url = build_magic_link_url(target_app)
+        if not base_url:
+            await m.answer("Ссылка недоступна. Проверьте настройки APP_URL/WEBAPP_URL.")
+            return
+        link = append_magic_token(base_url, token)
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="Открыть в браузере", url=link)]]
+        )
+        await m.answer(
+            f"Ваша ссылка для входа (действует {ttl} сек). "
+            "После открытия ссылка станет одноразовой.",
+            reply_markup=kb,
+        )
+        return
 
     parsed = parse_quick_input(m.text)
     if not parsed:
@@ -3732,6 +3958,21 @@ def auth_telegram(body: AuthTelegramIn, request: Request):
     log_auth_event("telegram", f"tg_{telegram_id}", request, "success", user_id=int(row["id"]))
     return make_auth_response(row)
 
+@APP.post("/api/auth/magic/create")
+def auth_magic_create(body: MagicCreateIn, request: Request):
+    require_magic_create_secret(request)
+    token, ttl = create_magic_login_token(
+        telegram_id=int(body.telegram_id),
+        target_app=body.target_app,
+        request=request,
+    )
+    return {"login_token": token, "expires_in": ttl}
+
+
+@APP.post("/api/auth/magic/exchange", response_model=AuthOut)
+def auth_magic_exchange(request: Request):
+    login_token = get_magic_login_token(request)
+    return exchange_magic_login_token(login_token, request)
 
 
 @APP.get("/api/me")

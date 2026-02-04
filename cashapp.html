@@ -753,6 +753,19 @@
       return end === -1 ? trimmed.slice(valueStart) : trimmed.slice(valueStart, end);
     }
 
+    function consumeMagicTokenFromUrl(){
+      try{
+        const url = new URL(window.location.href);
+        const token = url.searchParams.get("token") || "";
+        if (token){
+          url.searchParams.delete("token");
+          history.replaceState({}, document.title, url.toString());
+        }
+        return token;
+      }catch{
+        return "";
+      }
+    }
 
     function getInitDataFromUrl(){
       try{
@@ -831,6 +844,28 @@
       },
       get(p){ return this.req("GET", p); },
       post(p,b){ return this.req("POST", p, b); },
+      async authMagic(loginToken){
+        const res = await fetch(`${this.baseUrl}/api/auth/magic/exchange`,{
+          method: "POST",
+          headers: { "Authorization": `Bearer ${loginToken}` },
+        });
+        const txt = await res.text();
+        let data = null;
+        try{ data = txt ? JSON.parse(txt) : null; } catch { data = txt; }
+        if (!res.ok){
+          if (res.status === 401){
+            throw new Error("Ссылка истекла или недействительна.");
+          }
+          if (res.status === 403){
+            throw new Error("Недостаточно прав для доступа.");
+          }
+          const msg = (data && data.detail) ? data.detail : (typeof data === "string" ? data : "Ошибка авторизации");
+          throw new Error(msg);
+        }
+        if (data?.token) this.setToken(data.token);
+        if (data?.user) applyUser(data.user);
+        return data;
+      },
     };
 
     /**********************
@@ -1332,13 +1367,18 @@
 
     async function ensureAuth(){
       const initData = getTelegramInitData();
-      if (!initData && !API.token){
-        toggleAuthCard(true, "Откройте приложение через Telegram, чтобы пройти авторизацию.");
-        setStatus("Нет Telegram initData", "error");
-        return false;
-      }
+
       try{
         setStatus("Авторизация…");
+        const magicToken = consumeMagicTokenFromUrl();
+        if (magicToken){
+          await API.authMagic(magicToken);
+        }
+        if (!initData && !API.token){
+          toggleAuthCard(true, "Откройте приложение через Telegram или используйте ссылку входа.");
+          setStatus("Нет данных авторизации", "error");
+          return false;
+        }
         if (initData && !API.token){
           const res = await API.post("/api/auth/telegram", { initData });
           if (res?.token) API.setToken(res.token);

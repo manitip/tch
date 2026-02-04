@@ -3620,6 +3620,19 @@
       return end === -1 ? trimmed.slice(valueStart) : trimmed.slice(valueStart, end);
     }
 
+    function consumeMagicTokenFromUrl(){
+      try{
+        const url = new URL(window.location.href);
+        const token = url.searchParams.get("token") || "";
+        if (token){
+          url.searchParams.delete("token");
+          history.replaceState({}, document.title, url.toString());
+        }
+        return token;
+      }catch{
+        return "";
+      }
+    }
 
     function getInitDataFromUrl(){
       try{
@@ -3692,6 +3705,23 @@
         if (!res.ok) {
           const t = await res.text().catch(()=> "");
           throw new Error(`Auth failed: ${res.status} ${t}`);
+        }
+        const data = await res.json();
+        API.token = data.token;
+        API.user = data.user;
+        localStorage.setItem("sessionToken", API.token);
+        localStorage.setItem("sessionUser", JSON.stringify(API.user));
+        return data;
+      },
+
+      async authMagic(loginToken){
+        const res = await fetch(`${API.baseUrl}/api/auth/magic/exchange`,{
+          method:"POST",
+          headers: {"Authorization": `Bearer ${loginToken}`}
+        });
+        if (!res.ok) {
+          const t = await res.text().catch(()=> "");
+          throw new Error(`${res.status}: ${t || "Unauthorized"}`);
         }
         const data = await res.json();
         API.token = data.token;
@@ -8692,7 +8722,7 @@
       // load templates early
       loadTemplates();
       rebuildTemplateSelect();
-      showAuthGate("Проверяем доступ через Telegram...", "Авторизация");
+      showAuthGate("Проверяем доступ...", "Авторизация");
 
       // init dates
       const t = todayYMD();
@@ -8727,6 +8757,12 @@
 
 
       try{
+        const magicToken = consumeMagicTokenFromUrl();
+        if (magicToken){
+          showAuthGate("Входим по ссылке...", "Авторизация");
+          await API.authMagic(magicToken);
+        }
+      }
         const initData = getTelegramInitData();
         if (!initData && !API.token){
           throw new Error("Telegram initData is missing");
@@ -8740,10 +8776,14 @@
       }catch(e){
         const parsed = parseApiError(e);
         const raw = parsed.detail || String(e?.message || "Авторизация не удалась.");
-        if (/initData/i.test(raw)){
+        if (parsed.status === 401){
+          showAuthGate("Ссылка истекла или недействительна.", "Авторизация");
+        } else if (parsed.status === 403){
+          showAuthGate("Недостаточно прав для доступа.", "Авторизация");
+        } else if (/initData/i.test(raw)){
           showAuthGate(
-            "Откройте приложение через Telegram, чтобы пройти авторизацию по Telegram ID.",
-            "Требуется Telegram"
+            "Откройте приложение через Telegram или используйте ссылку входа из бота.",
+            "Требуется авторизация"
           );
         } else {
           showAuthGate(raw, "Нет доступа");
