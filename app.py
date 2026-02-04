@@ -331,6 +331,10 @@ def ensure_user_auth_fields() -> None:
             (login, password_hash, updated_at, int(row["id"])),
         )
 
+def ensure_magic_links_fields() -> None:
+    cols = {r["name"] for r in db_fetchall("PRAGMA table_info(magic_links);")}
+    if "target_app" not in cols:
+        db_exec("ALTER TABLE magic_links ADD COLUMN target_app TEXT NOT NULL DEFAULT 'webapp';")
 
 
 
@@ -388,6 +392,8 @@ def init_db() -> None:
         );
         """
     )
+    ensure_magic_links_fields()
+
     # months
     db_exec(
         """
