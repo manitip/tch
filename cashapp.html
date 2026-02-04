@@ -530,19 +530,11 @@
       </div>
     </div>
 
-    <div id="loginCard" class="card cardPad hidden">
-      <div class="label">Вход</div>
-      <div class="field">
-        <div class="label">Логин</div>
-        <input id="loginInput" class="input" type="text" autocomplete="username" />
+    <div id="authCard" class="card cardPad hidden">
+      <div class="label">Авторизация</div>
+      <div class="muted small" id="authMessage">
+        Откройте приложение через Telegram, чтобы пройти авторизацию по Telegram ID.
       </div>
-      <div class="field">
-        <div class="label">Пароль</div>
-        <input id="passwordInput" class="input" type="password" autocomplete="current-password" />
-      </div>
-      <div id="loginError" class="errorText hidden"></div>
-      <div class="sp8"></div>
-      <button id="loginBtn" class="btn btnPrimary" type="button">Войти</button>
     </div>
 
 
@@ -746,7 +738,23 @@
       if (ThemeState.mode === "auto") applyTheme("auto");
     });
 
+    function getInitDataFromUrl(){
+      try{
+        const searchParams = new URLSearchParams(location.search || "");
+        const fromSearch = searchParams.get("tgWebAppData");
+        if (fromSearch) return fromSearch;
+        const hash = (location.hash || "").replace(/^#/, "");
+        if (!hash) return "";
+        const hashParams = new URLSearchParams(hash);
+        return hashParams.get("tgWebAppData") || "";
+      }catch{
+        return "";
+      }
+    }
 
+    function getTelegramInitData(){
+      return tg?.initData || getInitDataFromUrl();
+    }
 
     /**********************
      * API helper
@@ -1282,18 +1290,7 @@
     /**********************
      * Auth + init
      **********************/
-    async function authLogin(){
-      const login = ($("loginInput")?.value || "").trim();
-      const password = $("passwordInput")?.value || "";
-      if (!login || !password){
-        setLoginError("Введите логин и пароль");
-        return null;
-      }
-      setLoginError("");
-      setStatus("Авторизация…");
-      const res = await API.post("/api/auth/login", { login, password });
-      return res;
-    }
+
 
     async function loadMe(){
       const me = await API.get("/api/me");
@@ -1302,40 +1299,37 @@
       return me;
     }
 
-    function setLoginError(message){
-      const el = $("loginError");
-      if (!el) return;
-      if (!message){
-        el.textContent = "";
-        el.classList.add("hidden");
-        return;
-      }
-      el.textContent = message;
-      el.classList.remove("hidden");
-    }
-
-    function toggleLoginCard(show){
-      const card = $("loginCard");
+    function toggleAuthCard(show, message){
+      const card = $("authCard");
       if (!card) return;
+      if (message){
+        $("authMessage").textContent = message;
+      }
       card.classList.toggle("hidden", !show);
     }
 
     async function ensureAuth(){
-
-      const stored = localStorage.getItem("cashapp_token");
-      if (stored){
-        API.setToken(stored);
-        try{
-          await loadMe();
-          toggleLoginCard(false);
-          return true;
-        }catch{
-          API.clearToken();
-        }
+      const initData = getTelegramInitData();
+      if (!initData){
+        toggleAuthCard(true, "Откройте приложение через Telegram, чтобы пройти авторизацию.");
+        setStatus("Нет Telegram initData", "error");
+        return false;
       }
-      toggleLoginCard(true);
-      setStatus("Введите логин и пароль", "error");
-      return false;
+      try{
+        setStatus("Авторизация…");
+        const res = await API.post("/api/auth/telegram", { initData });
+        if (res?.token) API.setToken(res.token);
+        if (res?.user) applyUser(res.user);
+        await loadMe();
+        toggleAuthCard(false);
+        return true;
+      }catch(err){
+        API.clearToken();
+        toggleAuthCard(true, err?.message || "Нет доступа");
+        setStatus("Ошибка", "error");
+        return false;
+      }
+
     }
 
 
@@ -1357,24 +1351,6 @@
         .catch(e=> toast(String(e.message||e)));
     });
 
-    $("loginBtn").addEventListener("click", async ()=>{
-      try{
-        const res = await authLogin();
-        if (!res || !res.token) return;
-        API.setToken(res.token);
-        if (res.user){
-          applyUser(res.user);
-        } else {
-          await loadMe();
-        }
-        toggleLoginCard(false);
-        setStatus("Готово", "success");
-        await loadList();
-      }catch(e){
-        setLoginError(String(e.message || e));
-        setStatus("Ошибка", "error");
-      }
-    });
 
 
     $("themeBtn").addEventListener("click", ()=>{

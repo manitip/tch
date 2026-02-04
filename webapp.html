@@ -2087,38 +2087,10 @@
 
   <div id="authGate" class="authGate" role="dialog" aria-live="polite" aria-modal="true">
     <div class="authGateCard">
-      <div id="authGateTitle" class="authGateTitle">Вход в систему</div>
-      <p id="authGateMessage" class="authGateMessage">Введите логин и пароль.</p>
-      <div class="form" style="gap:12px;">
-        <div class="field authRegisterOnly hidden">
-          <label>Имя</label>
-          <input id="authNameInput" class="input" type="text" autocomplete="name" placeholder="Напр.: Никита" />
-          <div class="tiny muted2">Имя или как к вам обращаться в отчётах.</div>
-        </div>
-        <div class="field authRegisterOnly hidden">
-          <label>Тим / команда</label>
-          <input id="authTeamInput" class="input" type="text" autocomplete="organization" placeholder="Напр.: admin или Бухгалтерия" />
-          <div class="tiny muted2">Название команды/проекта, как в вашей учётке.</div>
-        </div>
-        <div class="field">
-          <label>Логин</label>
-          <input id="authLoginInput" class="input" type="text" autocomplete="username" placeholder="Напр.: admin" />
-          <div class="tiny muted2">Латиница/цифры, без пробелов.</div>
-        </div>
-        <div class="field">
-          <label>Пароль</label>
-          <input id="authPasswordInput" class="input" type="password" autocomplete="current-password" placeholder="Минимум 6 символов" />
-          <div class="tiny muted2">Используйте минимум 6 символов.</div>
-        </div>
-        <div id="authGateError" class="tiny authGateError hidden"></div>
-      </div>
-      <div class="authGateActions">
-        <button id="authGateSubmit" class="authGateBtn primary" type="button">Войти</button>
-        <button id="authGateClear" class="authGateBtn" type="button">Очистить</button>
-      </div>
-      <div class="authGateSwitch">
-        <button id="authGateToggle" class="authGateLink" type="button">Нет аккаунта? Регистрация</button>
-      </div>
+      <div id="authGateTitle" class="authGateTitle">Требуется Telegram</div>
+      <p id="authGateMessage" class="authGateMessage">
+        Откройте приложение через Telegram, чтобы пройти авторизацию по Telegram ID.
+      </p>
     </div>
   </div>
 
@@ -3229,63 +3201,12 @@
                 <div class="section" id="usersSection">
                   <div class="sectionHeader"><h3>Пользователи</h3></div>
                   <div class="card bigCard">
-                    <div class="form" style="gap:12px;">
-                      <div class="grid2">
-                        <div class="field">
-                          <label>Имя</label>
-                          <input id="userNameInput" class="input" type="text" placeholder="Напр. Иван" />
-                        </div>
-                        <div class="field">
-                          <label>Тим / команда</label>
-                          <input id="userTeamInput" class="input" type="text" placeholder="Напр. Прославление" />
-                        </div>
-                        <div class="field">
-                          <label>Логин</label>
-                          <input id="userLoginInput" class="input" type="text" placeholder="user_login" />
-                        </div>
-                        <div class="field">
-                          <label>Пароль</label>
-                          <input id="userPasswordInput" class="input" type="password" placeholder="Пароль" />
-                        </div>
-                        <div class="field">
-                          <label>Роль</label>
-                          <select id="userRoleSelect" class="input">
-                            <option value="viewer">Viewer (только просмотр)</option>
-                            <option value="accountant">Accountant (редактирование)</option>
-                            <option value="cash_signer">Cash signer (подписи)</option>
-                            <option value="admin">Admin (полный доступ)</option>
-                          </select>
-                        </div>
-                      </div>
-                      <button id="createUserBtn" class="btn primary" type="button">
-                        <span class="icon">person_add</span> Добавить пользователя
-                      </button>
+                    <div class="tiny muted2">
+                      Управление доступом выполняется через файл <code>users.json</code>
+                      (по Telegram ID). После изменения файла откройте приложение заново.
                     </div>
                     <div class="spacer12"></div>
                     <div id="usersList" class="list"></div>
-                  </div>
-                  <div class="spacer12"></div>
-                  <div class="card bigCard">
-                    <div class="form" style="gap:12px;">
-                      <div class="bold">Заявки на регистрацию</div>
-                      <div id="registrationRequestsList" class="list"></div>
-                    </div>
-                  </div>
-                  <div class="spacer12"></div>
-                  <div class="card bigCard">
-                    <div class="form" style="gap:12px;">
-                      <div class="field">
-                        <label>Текущий пароль администратора</label>
-                        <input id="adminCurrentPassword" class="input" type="password" autocomplete="current-password" />
-                      </div>
-                      <div class="field">
-                        <label>Новый пароль администратора</label>
-                        <input id="adminNewPassword" class="input" type="password" autocomplete="new-password" />
-                      </div>
-                      <button id="changeAdminPasswordBtn" class="btn" type="button">
-                        <span class="icon">lock</span> Сменить пароль
-                      </button>
-                    </div>
                   </div>
                 </div>
               </div>
@@ -3699,6 +3620,31 @@
       }
     }
 
+    function getTelegramInitData(){
+      return tg?.initData || getInitDataFromUrl();
+    }
+
+    function getTelegramUserId(){
+      const directId = tg?.initDataUnsafe?.user?.id;
+      if (directId) return Number(directId);
+      const initData = getInitDataFromUrl();
+      if (!initData) return null;
+      try{
+        const params = new URLSearchParams(initData);
+        const userRaw = params.get("user");
+        if (!userRaw) return null;
+        let parsed = null;
+        try{
+          parsed = JSON.parse(userRaw);
+        }catch{
+          parsed = JSON.parse(decodeURIComponent(userRaw));
+        }
+        if (parsed && parsed.id) return Number(parsed.id);
+      }catch{
+        return null;
+      }
+      return null;
+    }
 
 
 
@@ -3721,11 +3667,11 @@
         }
         return location.origin;
       })(), // same host unless overridden
-      async login(login, password){
-        const res = await fetch(`${API.baseUrl}/api/auth/login`,{
+      async authTelegram(initData){
+        const res = await fetch(`${API.baseUrl}/api/auth/telegram`,{
           method:"POST",
           headers: {"Content-Type":"application/json"},
-          body: JSON.stringify({login, password})
+          body: JSON.stringify({ initData })
         });
         if (!res.ok) {
           const t = await res.text().catch(()=> "");
@@ -3738,34 +3684,29 @@
         localStorage.setItem("sessionUser", JSON.stringify(API.user));
         return data;
       },
-      async register(payload){
-        const res = await fetch(`${API.baseUrl}/api/auth/register`,{
-          method:"POST",
-          headers: {"Content-Type":"application/json"},
-          body: JSON.stringify(payload)
-        });
-        if (!res.ok) {
-          const t = await res.text().catch(()=> "");
-          throw new Error(`Auth failed: ${res.status} ${t}`);
-        }
-        const data = await res.json();
-        if (data.status === "approved" && data.token && data.user){
-          API.token = data.token;
-          API.user = data.user;
-          localStorage.setItem("sessionToken", API.token);
-          localStorage.setItem("sessionUser", JSON.stringify(API.user));
-        }
-        return data;
-      },
-      async ensureAuth(){
 
-        if (!API.token) {
-          API.token = localStorage.getItem("sessionToken");
-          try { API.user = JSON.parse(localStorage.getItem("sessionUser")||"null"); } catch { API.user=null; }
+      async ensureAuth(){
+        const telegramUserId = getTelegramUserId();
+        const initData = getTelegramInitData();
+        if (!initData) {
+          throw new Error("Telegram initData is missing");
         }
-        if (!API.token) throw new Error("Missing auth token");
+        if (telegramUserId && API.user?.telegram_id && Number(API.user.telegram_id) !== telegramUserId) {
+          API.token = null;
+          API.user = null;
+          localStorage.removeItem("sessionToken");
+          localStorage.removeItem("sessionUser");
+          throw new Error("Аккаунт Telegram изменился. Войдите или зарегистрируйтесь заново.");
+        }
 
         const me = await API.get("/api/me");
+        if (telegramUserId && Number(me?.telegram_id) !== telegramUserId) {
+          API.token = null;
+          API.user = null;
+          localStorage.removeItem("sessionToken");
+          localStorage.removeItem("sessionUser");
+          throw new Error("Аккаунт Telegram изменился. Войдите или зарегистрируйтесь заново.");
+        }
         API.user = me;
         return me;
       },
@@ -3838,61 +3779,22 @@
       mode: "login",
     };
 
-    function authDefaultMessage(mode){
-      return mode === "register"
-        ? "Заполните данные для регистрации."
-        : "Введите логин и пароль.";
-    }
-
-    function setAuthGateMode(mode){
-      AuthGateState.mode = mode;
-      const isRegister = mode === "register";
-      const title = $("#authGateTitle");
-      if (title) title.textContent = isRegister ? "Регистрация" : "Вход в систему";
-      const msgEl = $("#authGateMessage");
-      if (msgEl) msgEl.textContent = authDefaultMessage(mode);
-      $$(".authRegisterOnly").forEach((el)=> el.classList.toggle("hidden", !isRegister));
-      const submitBtn = $("#authGateSubmit");
-      if (submitBtn) submitBtn.textContent = isRegister ? "Зарегистрироваться" : "Войти";
-      const toggleBtn = $("#authGateToggle");
-      if (toggleBtn) {
-        toggleBtn.textContent = isRegister ? "Уже есть аккаунт? Войти" : "Нет аккаунта? Регистрация";
-      }
-    }
-
-
-
-    function showAuthGate(message){
+    function showAuthGate(message, title){
       const gate = $("#authGate");
       if (!gate) return;
-      setAuthGateMode(AuthGateState.mode || "login");
+      const titleEl = $("#authGateTitle");
+      if (titleEl && title) titleEl.textContent = title;
       const msgEl = $("#authGateMessage");
-      if (msgEl) msgEl.textContent = message || authDefaultMessage(AuthGateState.mode);
-      setAuthError("");
+      if (msgEl && message) msgEl.textContent = message;
       gate.classList.remove("hidden");
-      const loginInput = $("#authLoginInput");
-      if (loginInput) {
-        setTimeout(()=> loginInput.focus({preventScroll:true}), 0);
-      }
-    }
 
-    function setAuthError(message){
-      const el = $("#authGateError");
-      if (!el) return;
-      if (!message){
-        el.textContent = "";
-        el.classList.add("hidden");
-        return;
-      }
-      el.textContent = message;
-      el.classList.remove("hidden");
     }
 
     function hideAuthGate(){
       const gate = $("#authGate");
       if (!gate) return;
       gate.classList.add("hidden");
-      setAuthError("");
+
     }
 
 
@@ -3943,7 +3845,6 @@
       historyTags: [],
       historyTagMode: "any",
       users: [],
-      registrationRequests: [],
       monitorTab: "errors",
       monitorOverview: null,
       monitorTab: "errors",
@@ -7622,47 +7523,13 @@
         const team = escapeHtml(u.team || "—");
         const role = escapeHtml(u.role || "—");
         const login = escapeHtml(u.login || "—");
+        const telegramId = escapeHtml(String(u.telegram_id || "—"));
         const active = u.active ? "Активен" : "Отключён";
-        return `
-          <div class="card bigCard" style="padding:12px;">
-            <div class="rowBetween" style="gap:12px; flex-wrap:wrap;">
-              <div>
-                <div class="bold">${name}</div>
+                <div class="tiny muted2">Telegram ID: ${telegramId}</div>
                 <div class="tiny muted2">Логин: ${login} • Тим: ${team}</div>
               </div>
               <div class="chip">${role}</div>
               <div class="tiny muted2">${active}</div>
-            </div>
-          </div>
-        `;
-      }).join("");
-    }
-
-    function renderRegistrationRequests(){
-      const list = $("#registrationRequestsList");
-      if (!list) return;
-      const items = State.registrationRequests || [];
-      if (!items.length){
-        list.innerHTML = `<div class="card bigCard"><div class="tiny muted2">Заявок пока нет.</div></div>`;
-        return;
-      }
-      list.innerHTML = items.map((r)=>{
-        const name = escapeHtml(r.name || r.login || "—");
-        const login = escapeHtml(r.login || "—");
-        const team = escapeHtml(r.team || "—");
-        const createdAt = escapeHtml(fmtDateTime(r.created_at || ""));
-        return `
-          <div class="card bigCard" style="padding:12px;">
-            <div class="rowBetween" style="gap:12px; flex-wrap:wrap;">
-              <div>
-                <div class="bold">${name}</div>
-                <div class="tiny muted2">Логин: ${login} • Тим: ${team}</div>
-                <div class="tiny muted2">Создано: ${createdAt}</div>
-              </div>
-              <div class="row" style="gap:8px; flex-wrap:wrap;">
-                <button class="btn small" data-action="approve" data-id="${r.id}">Одобрить</button>
-                <button class="btn small danger" data-action="reject" data-id="${r.id}">Отклонить</button>
-              </div>
             </div>
           </div>
         `;
@@ -7685,20 +7552,6 @@
       }
     }
 
-    async function loadRegistrationRequests(){
-      if (State.role !== "admin") return;
-      try{
-        const res = await API.get("/api/admin/registration-requests?status=pending");
-        State.registrationRequests = res.items || [];
-        renderRegistrationRequests();
-      }catch(e){
-        State.registrationRequests = [];
-        const list = $("#registrationRequestsList");
-        if (list){
-          list.innerHTML = `<div class="card bigCard"><div class="tiny muted2">Не удалось загрузить заявки.</div></div>`;
-        }
-      }
-    }
 
 
 
@@ -7754,7 +7607,7 @@
       {
         id: "usersSection",
         title: "Пользователи",
-        subtitle: "Доступ и роли",
+        subtitle: "Доступ через users.json",
         icon: "group",
         rolesVisible: ["admin"],
         rolesEditable: ["admin"],
@@ -8322,141 +8175,7 @@
      * Event wiring
      **********************/
     function wireEvents(){
-      $("#authGateSubmit")?.addEventListener("click", async ()=>{
-        const login = ($("#authLoginInput")?.value || "").trim();
-        const password = $("#authPasswordInput")?.value || "";
-        if (!login || !password){
-          setAuthError("Введите логин и пароль.");
-          return;
-        }
-        setAuthError("");
-        if (AuthGateState.mode === "register"){
-          const name = ($("#authNameInput")?.value || "").trim();
-          const team = ($("#authTeamInput")?.value || "").trim();
-          try{
-            const res = await API.register({ login, password, name, team });
-            if (res.status === "approved"){
-              hideAuthGate();
-              window.location.reload();
-              return;
-            }
-            setAuthError("Заявка отправлена. Дождитесь одобрения администратора.");
-          }catch(e){
-            const parsed = parseApiError(e);
-            setAuthError(parsed.detail || "Не удалось отправить заявку.");
-          }
-          return;
-        }
-        try{
-          await API.login(login, password);
-          hideAuthGate();
-          window.location.reload();
-        }catch(e){
-          const parsed = parseApiError(e);
-          setAuthError(parsed.detail || "Не удалось войти. Проверьте данные.");
-        }
-      });
-      $("#authGateClear")?.addEventListener("click", ()=>{
-        const loginInput = $("#authLoginInput");
-        const passInput = $("#authPasswordInput");
-        const nameInput = $("#authNameInput");
-        const teamInput = $("#authTeamInput");
-        if (loginInput) loginInput.value = "";
-        if (passInput) passInput.value = "";
-        if (nameInput) nameInput.value = "";
-        if (teamInput) teamInput.value = "";
-        setAuthError("");
-        setAuthGateMode(AuthGateState.mode);
-      });
 
-      $("#authGateToggle")?.addEventListener("click", ()=>{
-        const nextMode = AuthGateState.mode === "register" ? "login" : "register";
-        setAuthGateMode(nextMode);
-      });
-
-      $("#authBtn")?.addEventListener("click", ()=>{
-        AuthGateState.mode = "login";
-        showAuthGate("Введите логин и пароль.");
-      });
-
-
-      $("#createUserBtn")?.addEventListener("click", async ()=>{
-        if (State.role !== "admin") {
-          setToast("Нет доступа");
-          return;
-        }
-        const name = ($("#userNameInput")?.value || "").trim();
-        const team = ($("#userTeamInput")?.value || "").trim();
-        const login = ($("#userLoginInput")?.value || "").trim();
-        const password = $("#userPasswordInput")?.value || "";
-        const role = $("#userRoleSelect")?.value || "viewer";
-        if (!login || !password){
-          setToast("Укажите логин и пароль");
-          return;
-        }
-        try{
-          await API.post("/api/admin/users", { login, password, name, team, role });
-          $("#userNameInput").value = "";
-          $("#userTeamInput").value = "";
-          $("#userLoginInput").value = "";
-          $("#userPasswordInput").value = "";
-          $("#userRoleSelect").value = "viewer";
-          await loadUsers();
-          setToast("Пользователь добавлен");
-        }catch(e){
-          const parsed = parseApiError(e);
-          setToast(parsed.detail || "Не удалось добавить пользователя");
-        }
-      });
-
-      $("#registrationRequestsList")?.addEventListener("click", async (e)=>{
-        if (State.role !== "admin") {
-          setToast("Нет доступа");
-          return;
-        }
-        const btn = e.target.closest("button[data-action]");
-        if (!btn) return;
-        const requestId = Number(btn.dataset.id || 0);
-        if (!requestId) return;
-        const action = btn.dataset.action;
-        try{
-          if (action === "approve"){
-            await API.post(`/api/admin/registration-requests/${requestId}/approve`, {});
-            setToast("Заявка одобрена");
-            await loadUsers();
-          } else if (action === "reject"){
-            await API.post(`/api/admin/registration-requests/${requestId}/reject`, {});
-            setToast("Заявка отклонена");
-          }
-          await loadRegistrationRequests();
-        }catch(err){
-          const parsed = parseApiError(err);
-          setToast(parsed.detail || "Не удалось обработать заявку");
-        }
-      });
-
-
-      $("#changeAdminPasswordBtn")?.addEventListener("click", async ()=>{
-        if (State.role !== "admin") {
-          setToast("Нет доступа");
-          return;
-        }
-        const currentPassword = $("#adminCurrentPassword")?.value || "";
-        const newPassword = $("#adminNewPassword")?.value || "";
-        if (!currentPassword || !newPassword){
-          setToast("Заполните оба поля");
-          return;
-        }
-        try{
-          await API.post("/api/admin/password", { current_password: currentPassword, new_password: newPassword });
-          $("#adminCurrentPassword").value = "";
-          $("#adminNewPassword").value = "";
-          setToast("Пароль обновлён");
-        }catch(e){
-          const parsed = parseApiError(e);
-          setToast(parsed.detail || "Не удалось сменить пароль");
-        }
-      });
 
       // nav
       $$(".navBtn").forEach(btn=>{
@@ -8941,7 +8660,7 @@
       // load templates early
       loadTemplates();
       rebuildTemplateSelect();
-      showAuthGate("Введите логин и пароль.");
+      showAuthGate("Проверяем доступ через Telegram...", "Авторизация");
 
       // init dates
       const t = todayYMD();
@@ -8975,22 +8694,13 @@
       // We'll keep it visible but will block opening.
 
 
-      const hasStoredToken = Boolean(localStorage.getItem("sessionToken"));
-      if (!hasStoredToken){
-        AuthGateState.mode = "login";
-        showAuthGate("Введите логин и пароль.");
-        return;
-      }
-
-
       try{
         await API.ensureAuth();
         hideAuthGate();
       }catch(e){
         const parsed = parseApiError(e);
         const raw = parsed.detail || String(e?.message || "Авторизация не удалась.");
-        AuthGateState.mode = "login";
-        showAuthGate(raw);
+        showAuthGate(raw, "Нет доступа");
         return;
       }
 

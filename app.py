@@ -2344,34 +2344,21 @@ class AuthOut(BaseModel):
     token: str
     user: Dict[str, Any]
 
-class AuthLoginIn(BaseModel):
-    login: str
-    password: str
-
-
-class AuthRegisterIn(BaseModel):
-    login: str
-    password: str
-    name: Optional[str] = None
-    team: Optional[str] = None
-
-
-class AdminPasswordChangeIn(BaseModel):
-    current_password: str
-    new_password: str
-
-
-class UserCreateIn(BaseModel):
-    login: str
-    password: str
-    name: Optional[str] = None
-    team: Optional[str] = None
-    role: str = "viewer"
-    active: bool = True
-
-
-class UserPasswordResetIn(BaseModel):
-    password: str
+def _get_auth_user_from_allowlist(telegram_id: int, request: Optional[Request]) -> sqlite3.Row:
+    allow = refresh_allowlist_if_needed()
+    allow_user = allow.get(int(telegram_id))
+    login = f"tg_{telegram_id}"
+    if not allow_user or not allow_user.get("active"):
+        log_auth_event("telegram", login, request, "fail", "not_in_allowlist")
+        raise HTTPException(
+            status_code=403,
+            detail="User not allowed. Add Telegram ID to users.json.",
+        )
+    row = db_fetchone("SELECT * FROM users WHERE telegram_id=?;", (int(telegram_id),))
+    if not row or int(row["active"]) != 1:
+        log_auth_event("telegram", login, request, "fail", "inactive")
+        raise HTTPException(status_code=403, detail="User not allowed / inactive")
+    return row
 
 
 def get_bearer_token(request: Request) -> str:
@@ -2399,6 +2386,10 @@ def get_current_user(request: Request) -> sqlite3.Row:
 
 def admin_exists() -> bool:
     row = db_fetchone("SELECT id FROM users WHERE role='admin' AND active=1 LIMIT 1;")
+    return bool(row)
+
+def has_registered_web_users() -> bool:
+    row = db_fetchone("SELECT id FROM users WHERE login NOT LIKE 'tg_%' LIMIT 1;")
     return bool(row)
 
 
@@ -3720,107 +3711,20 @@ def favicon():
 # Auth
 # ---------------------------
 
-@APP.post("/api/auth/login", response_model=AuthOut)
-def auth_login(body: AuthLoginIn, request: Request):
-    login = body.login.strip()
-    if not login:
-        log_auth_event("login", login, request, "fail", "missing_login")
-        raise HTTPException(status_code=400, detail="Login is required")
-    row = db_fetchone("SELECT * FROM users WHERE login=?;", (login,))
-    if not row or int(row["active"]) != 1:
-        log_auth_event("login", login, request, "fail", "invalid_credentials")
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    if not verify_password(body.password, str(row["password_hash"])):
-        log_auth_event("login", login, request, "fail", "invalid_credentials")
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    log_auth_event("login", login, request, "success", user_id=int(row["id"]))
+@APP.post("/api/auth/telegram", response_model=AuthOut)
+def auth_telegram(body: AuthTelegramIn, request: Request):
+    payload = validate_telegram_init_data(body.initData, CFG.BOT_TOKEN)
+    user = payload.get("user") or {}
+    telegram_id = int(user.get("id") or 0)
+    if not telegram_id:
+        log_auth_event("telegram", "unknown", request, "fail", "missing_telegram_id")
+        raise HTTPException(status_code=400, detail="Telegram user id is required")
+
+    row = _get_auth_user_from_allowlist(telegram_id, request)
+    log_auth_event("telegram", f"tg_{telegram_id}", request, "success", user_id=int(row["id"]))
     return make_auth_response(row)
 
-@APP.post("/api/auth/register")
-def auth_register(body: AuthRegisterIn, request: Request):
-    login = body.login.strip()
-    if not login:
-        log_auth_event("register", login, request, "fail", "missing_login")
-        raise HTTPException(status_code=400, detail="Login is required")
-    if not body.password.strip():
-        log_auth_event("register", login, request, "fail", "missing_password")
-        raise HTTPException(status_code=400, detail="Password is required")
-    if db_fetchone("SELECT id FROM users WHERE login=?;", (login,)):
-        log_auth_event("register", login, request, "fail", "login_exists")
-        raise HTTPException(status_code=400, detail="Login already exists")
-    existing_request = db_fetchone(
-        "SELECT id, status FROM registration_requests WHERE login=?;",
-        (login,),
-    )
-    if existing_request and str(existing_request["status"]) == "pending":
-        log_auth_event("register", login, request, "fail", "request_pending")
-        raise HTTPException(status_code=400, detail="Registration request already pending")
 
-    now = iso_now(CFG.tzinfo())
-    if not admin_exists():
-        admin_sql = """
-                INSERT INTO users (
-                    telegram_id, login, password_hash, name, team, role, active, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
-    """
-        admin_params = (
-            next_virtual_telegram_id(),
-            login,
-            hash_password(body.password),
-            body.name,
-            body.team,
-            "admin",
-            1,
-            now,
-            now,
-        )
-        new_id = db_exec_returning_id(admin_sql, admin_params)
-        row = db_fetchone("SELECT * FROM users WHERE id=?;", (new_id,))
-        if not row:
-            log_auth_event("register", login, request, "fail", "admin_create_failed")
-            raise HTTPException(status_code=500, detail="Failed to create admin")
-        payload = make_auth_response(row)
-        payload["status"] = "approved"
-        log_auth_event("register", login, request, "success", user_id=int(row["id"]))
-        return payload
-
-    if existing_request:
-        db_exec(
-            """
-            UPDATE registration_requests
-            SET password_hash=?, name=?, team=?, role=?, status='pending',
-                created_at=?, reviewed_at=NULL, reviewed_by_user_id=NULL
-            WHERE id=?;
-            """,
-            (
-                hash_password(body.password),
-                body.name,
-                body.team,
-                "cash_signer",
-                now,
-                int(existing_request["id"]),
-            ),
-        )
-
-        log_auth_event("register", login, request, "success", detail="request_updated")
-        return {"status": "pending", "request_id": int(existing_request["id"])}
-
-    req_id = db_exec_returning_id(
-        """
-        INSERT INTO registration_requests (login, password_hash, name, team, role, status, created_at)
-        VALUES (?, ?, ?, ?, ?, 'pending', ?);
-        """,
-        (
-            login,
-            hash_password(body.password),
-            body.name,
-            body.team,
-            "cash_signer",
-            now,
-        ),
-    )
-    log_auth_event("register", login, request, "success", detail="request_created")
-    return {"status": "pending", "request_id": req_id}
 
 @APP.get("/api/me")
 def me(u: sqlite3.Row = Depends(get_current_user)):
@@ -3834,21 +3738,6 @@ def me(u: sqlite3.Row = Depends(get_current_user)):
     }
 
 
-@APP.post("/api/admin/password")
-def change_admin_password(
-        body: AdminPasswordChangeIn,
-        u: sqlite3.Row = Depends(require_role("admin")),
-):
-    if not verify_password(body.current_password, str(u["password_hash"])):
-        raise HTTPException(status_code=400, detail="Current password is incorrect")
-    if not body.new_password.strip():
-        raise HTTPException(status_code=400, detail="New password is required")
-    now = iso_now(CFG.tzinfo())
-    db_exec(
-        "UPDATE users SET password_hash=?, updated_at=? WHERE id=?;",
-        (hash_password(body.new_password), now, int(u["id"])),
-    )
-    return {"ok": True}
 
 
 @APP.get("/api/admin/users")
@@ -3862,159 +3751,7 @@ def list_users(u: sqlite3.Row = Depends(require_role("admin"))):
     )
     return {"items": [dict(r) for r in rows]}
 
-@APP.get("/api/admin/registration-requests")
-def list_registration_requests(
-        status: Optional[str] = Query("pending"),
-        u: sqlite3.Row = Depends(require_role("admin")),
-):
-    params: List[Any] = []
-    where = ""
-    if status:
-        where = "WHERE status=?"
-        params.append(status)
-    rows = db_fetchall(
-        f"""
-        SELECT id, login, name, team, role, status, created_at, reviewed_at, reviewed_by_user_id
-        FROM registration_requests
-        {where}
-        ORDER BY created_at ASC;
-        """,
-        tuple(params),
-    )
-    return {"items": [dict(r) for r in rows]}
 
-
-@APP.post("/api/admin/registration-requests/{request_id}/approve")
-def approve_registration_request(
-        request_id: int,
-        u: sqlite3.Row = Depends(require_role("admin")),
-):
-    req = db_fetchone(
-        "SELECT * FROM registration_requests WHERE id=?;",
-        (int(request_id),),
-    )
-    if not req:
-        raise HTTPException(status_code=404, detail="Request not found")
-    if str(req["status"]) != "pending":
-        raise HTTPException(status_code=400, detail="Request already processed")
-    if db_fetchone("SELECT id FROM users WHERE login=?;", (req["login"],)):
-        raise HTTPException(status_code=400, detail="Login already exists")
-    now = iso_now(CFG.tzinfo())
-    new_id = db_exec_returning_id(
-        """
-        INSERT INTO users (telegram_id, login, password_hash, name, team, role, active, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
-        """,
-        (
-            next_virtual_telegram_id(),
-            req["login"],
-            req["password_hash"],
-            req["name"],
-            req["team"],
-            req["role"],
-            1,
-            now,
-            now,
-        ),
-    )
-    db_exec(
-        """
-        UPDATE registration_requests
-        SET status='approved', reviewed_at=?, reviewed_by_user_id=?
-        WHERE id=?;
-        """,
-        (now, int(u["id"]), int(request_id)),
-    )
-    row = db_fetchone(
-        "SELECT id, telegram_id, login, name, team, role, active, created_at, updated_at FROM users WHERE id=?;",
-        (new_id,),
-    )
-    return {"item": dict(row) if row else None}
-
-
-@APP.post("/api/admin/registration-requests/{request_id}/reject")
-def reject_registration_request(
-        request_id: int,
-        u: sqlite3.Row = Depends(require_role("admin")),
-):
-    req = db_fetchone(
-        "SELECT id, status FROM registration_requests WHERE id=?;",
-        (int(request_id),),
-    )
-    if not req:
-        raise HTTPException(status_code=404, detail="Request not found")
-    if str(req["status"]) != "pending":
-        raise HTTPException(status_code=400, detail="Request already processed")
-    now = iso_now(CFG.tzinfo())
-    db_exec(
-        """
-        UPDATE registration_requests
-        SET status='rejected', reviewed_at=?, reviewed_by_user_id=?
-        WHERE id=?;
-        """,
-        (now, int(u["id"]), int(request_id)),
-    )
-    return {"ok": True}
-
-
-
-@APP.post("/api/admin/users")
-def create_user(
-        body: UserCreateIn,
-        u: sqlite3.Row = Depends(require_role("admin")),
-):
-    login = body.login.strip()
-    if not login:
-        raise HTTPException(status_code=400, detail="Login is required")
-    if not body.password.strip():
-        raise HTTPException(status_code=400, detail="Password is required")
-    role = body.role.strip() or "viewer"
-    if role not in ("admin", "accountant", "viewer", "cash_signer"):
-        raise HTTPException(status_code=400, detail="Invalid role")
-    if db_fetchone("SELECT id FROM users WHERE login=?;", (login,)):
-        raise HTTPException(status_code=400, detail="Login already exists")
-    now = iso_now(CFG.tzinfo())
-    new_id = db_exec_returning_id(
-        """
-        INSERT INTO users (telegram_id, login, password_hash, name, team, role, active, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
-        """,
-        (
-            next_virtual_telegram_id(),
-            login,
-            hash_password(body.password),
-            body.name,
-            body.team,
-            role,
-            1 if body.active else 0,
-            now,
-            now,
-        ),
-    )
-    row = db_fetchone(
-        "SELECT id, telegram_id, login, name, team, role, active, created_at, updated_at FROM users WHERE id=?;",
-        (new_id,),
-    )
-    return {"item": dict(row) if row else None}
-
-
-@APP.put("/api/admin/users/{user_id}/password")
-def reset_user_password(
-        user_id: int,
-        body: UserPasswordResetIn,
-        u: sqlite3.Row = Depends(require_role("admin")),
-):
-    if not body.password.strip():
-        raise HTTPException(status_code=400, detail="Password is required")
-    target = db_fetchone("SELECT id FROM users WHERE id=?;", (int(user_id),))
-    if not target:
-        raise HTTPException(status_code=404, detail="User not found")
-    now = iso_now(CFG.tzinfo())
-    db_exec(
-        "UPDATE users SET password_hash=?, updated_at=? WHERE id=?;",
-        (hash_password(body.password), now, int(user_id)),
-    )
-    return {"ok": True}
 
 
 # ---------------------------
