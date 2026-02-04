@@ -1,0 +1,1408 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+  <meta name="color-scheme" content="light dark" />
+  <title>Подтверждение наличных</title>
+
+  <!-- Telegram WebApp -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+
+  <!-- Material Symbols (как в основном интерфейсе) -->
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:wght@300;400;500;600&display=swap" />
+
+  <style>
+
+    :root{
+      --bg:#0b0f14;
+      --card:rgba(255,255,255,.06);
+      --card2:rgba(255,255,255,.08);
+      --text:rgba(255,255,255,.92);
+      --muted:rgba(255,255,255,.65);
+      --muted2:rgba(255,255,255,.45);
+      --line:rgba(255,255,255,.10);
+      --shadow: 0 18px 40px rgba(0,0,0,.40);
+      --primary:#10b981;
+      --primary2:#34d399;
+      --danger:#fb7185;
+      --warn:#f59e0b;
+
+      --overlay: rgba(0,0,0,.45);
+      --overlay2: rgba(0,0,0,.30);
+
+      --radius:18px;
+      --radius2:14px;
+      --tap: rgba(255,255,255,.08);
+      --signature-bg: rgba(255,255,255,.08);
+      --signature-stroke: #0000ff;
+    }
+
+    [data-theme="light"]{
+      --bg:#f4f6fa;
+      --card:#ffffff;
+      --card2:#eef2f7;
+      --text:#0f172a;
+      --muted:#4b5563;
+      --muted2:#6b7280;
+      --line:rgba(15,23,42,.10);
+      --shadow: 0 10px 24px rgba(15,23,42,.10);
+      --primary:#10b981;
+      --primary2:#15b981;
+      --danger:#ef4444;
+      --warn:#f59e0b;
+
+      --overlay: rgba(255,255,255,.60);
+      --overlay2: rgba(15,23,42,.22);
+
+      --tap: rgba(15,23,42,.06);
+      --signature-bg: #f8fafc;
+      --signature-stroke: #0000ff;
+    }
+
+    .material-symbols-rounded{
+      font-variation-settings: 'FILL' 0, 'wght' 500, 'GRAD' 0, 'opsz' 24;
+      font-size: 20px;
+      line-height: 1;
+      vertical-align: middle;
+      user-select:none;
+    }
+
+    body{
+      margin:0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, "Apple Color Emoji","Segoe UI Emoji";
+      background: radial-gradient(900px 600px at 20% -10%, rgba(16,185,129,.18), transparent 60%),
+                  radial-gradient(900px 600px at 90% 0%, rgba(52,211,153,.16), transparent 62%),
+                  var(--bg);
+      color:var(--text);
+    }
+    .wrap{
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 16px 14px 26px;
+      padding-bottom: max(26px, env(safe-area-inset-bottom));
+    }
+
+    .topbar{
+      display:flex;
+      align-items:flex-start;
+      justify-content:space-between;
+      gap:12px;
+      margin: 6px 2px 14px;
+    }
+    .title{
+      line-height:1.1;
+    }
+    .title h1{
+      font-size: 22px;
+      margin:0 0 6px;
+      letter-spacing:-.2px;
+    }
+    .title .sub{
+      font-size: 12px;
+      color: var(--muted);
+      display:flex;
+      gap:8px;
+      align-items:center;
+      flex-wrap:wrap;
+    }
+    .statusLine{
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: var(--card2);
+      color: var(--muted);
+      font-weight: 700;
+    }
+    .statusLine.is-error{
+      color: var(--danger);
+      border-color: rgba(239,68,68,.35);
+      background: rgba(239,68,68,.12);
+    }
+    .statusLine.is-success{
+      color: var(--primary);
+      border-color: rgba(16,185,129,.35);
+      background: rgba(16,185,129,.12);
+    }
+    .chip{
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      padding: 6px 10px;
+      border: 1px solid var(--line);
+      background: var(--card2);
+      border-radius: 999px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .actions{
+      display:flex; gap:10px; align-items:center;
+    }
+    .iconBtn{
+      width:42px;height:42px;
+      border-radius: 14px;
+      border:1px solid var(--line);
+      background: var(--card);
+      display:grid; place-items:center;
+      box-shadow: var(--shadow);
+      cursor:pointer;
+      user-select:none;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .iconBtn:active{ transform: scale(.98); background: var(--tap); }
+
+    .card{
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+    .cardPad{ padding: 14px; }
+
+    .seg{
+      display:flex;
+      gap: 8px;
+      padding: 8px;
+      border-radius: 999px;
+      border:1px solid var(--line);
+      background: var(--card2);
+    }
+    .seg button{
+      flex:1;
+      border:0;
+      border-radius: 999px;
+      padding: 10px 12px;
+      font-weight: 700;
+      font-size: 13px;
+      color: var(--muted);
+      background: transparent;
+      cursor:pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .seg button.active{
+      color: var(--text);
+      background: rgba(16,185,129,.16);
+      border: 1px solid rgba(16,185,129,.25);
+      box-shadow: 0 10px 18px rgba(16,185,129,.12);
+    }
+
+    .row{
+      display:flex;
+      gap: 10px;
+      flex-wrap:wrap;
+      align-items:flex-end;
+    }
+    .field{
+      flex:1;
+      min-width: 160px;
+    }
+    .label{
+      font-size:12px;
+      color: var(--muted);
+      margin: 6px 2px 6px;
+      font-weight:700;
+    }
+
+    /* --- Fancy Dropdown (portal, no clipping) --- */
+    .dropdown{ position:relative; }
+    .ddTrigger{
+      width:100%;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      padding: 12px 12px;
+      border-radius: var(--radius2);
+      border:1px solid var(--line);
+      background: var(--card);
+      color: var(--text);
+      font-weight: 800;
+      cursor:pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .ddTrigger:active{ background: var(--tap); transform: scale(.99); }
+    .ddValue{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .ddChevron{
+      width: 20px; height: 20px; flex: 0 0 auto;
+      opacity:.8;
+      transition: transform .18s ease;
+    }
+    .dropdown.open .ddChevron{ transform: rotate(180deg); }
+
+    .ddPortal{
+      position:fixed;
+      inset:0;
+      z-index: 9999;
+      background: var(--overlay2);
+      backdrop-filter: blur(16px) saturate(1.2);
+      -webkit-backdrop-filter: blur(16px) saturate(1.2);
+    }
+    .ddPanel{
+      position:fixed;
+      min-width: 240px;
+      max-width: min(560px, calc(100vw - 24px));
+      border-radius: 16px;
+      border: 1px solid var(--line);
+      background: var(--card);
+      box-shadow: var(--shadow);
+      overflow:hidden;
+      transform: translateY(-6px) scale(.985);
+      opacity: 0;
+      transition: transform .18s ease, opacity .18s ease;
+    }
+    .ddPanel.show{ transform: translateY(0) scale(1); opacity: 1; }
+    .ddList{ max-height: min(52vh, 360px); overflow:auto; padding: 8px; }
+    .ddOpt{
+      width:100%;
+      text-align:left;
+      border:0;
+      background: transparent;
+      color: var(--text);
+      font-weight: 800;
+      padding: 12px 12px;
+      border-radius: 12px;
+      cursor:pointer;
+    }
+    .ddOpt small{ display:block; font-weight:700; color: var(--muted); margin-top: 2px; }
+    .ddOpt:hover{ background: rgba(16,185,129,.12); }
+    .ddOpt:active{ background: rgba(16,185,129,.18); }
+
+    /* --- Buttons --- */
+    .btn{
+      border:0;
+      border-radius: 14px;
+      padding: 12px 14px;
+      font-weight: 900;
+      cursor:pointer;
+      -webkit-tap-highlight-color: transparent;
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      gap:10px;
+      min-height: 44px;
+      white-space:nowrap;
+    }
+    .btnPrimary{
+      background: linear-gradient(180deg, var(--primary), var(--primary2));
+      color:#fff;
+      box-shadow: 0 14px 26px rgba(21,185,129,.25);
+    }
+    .btnGhost{
+      background: var(--card);
+      color: var(--text);
+      border: 1px solid var(--line);
+    }
+    .btnDanger{
+      background: rgba(239,68,68,.12);
+      border:1px solid rgba(239,68,68,.25);
+      color: var(--danger);
+    }
+    .btn:active{ transform: scale(.99); }
+    .btn:disabled,
+    .btn[aria-disabled="true"]{
+      opacity: .55;
+      cursor: not-allowed;
+      box-shadow: none;
+      transform: none;
+    }
+
+    .sp12{ height:12px; }
+    .sp8{ height:8px; }
+    .muted{ color: var(--muted); }
+    .small{ font-size: 12px; }
+
+    /* --- List --- */
+    .list{ display:flex; flex-direction:column; gap:10px; }
+    .item{
+      padding: 12px 12px;
+      border-radius: 16px;
+      border:1px solid var(--line);
+      background: var(--signature-bg);
+      cursor:pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .item:active{ background: var(--tap); transform: scale(.995); }
+    .itemTop{
+      display:flex; justify-content:space-between; gap:10px; align-items:baseline;
+      font-weight: 950;
+    }
+    .itemTop .sum{ font-size: 16px; letter-spacing:-.2px; }
+    .itemMeta{
+      margin-top: 6px;
+      display:flex; gap:10px; flex-wrap:wrap;
+      font-size: 12px;
+      color: var(--muted);
+      font-weight: 800;
+    }
+    .badge{
+      padding: 5px 10px;
+      border-radius: 999px;
+      border:1px solid var(--line);
+      background: var(--card2);
+      font-size: 12px;
+      font-weight: 900;
+      color: var(--muted);
+    }
+    .badge.ok{
+      color: var(--primary);
+      border-color: rgba(16,185,129,.3);
+      background: rgba(16,185,129,.12);
+    }
+    .badge.warn{
+      color: var(--warn);
+      border-color: rgba(245,158,11,.35);
+      background: rgba(245,158,11,.12);
+    }
+    .badge.danger{
+      color: var(--danger);
+      border-color: rgba(239,68,68,.35);
+      background: rgba(239,68,68,.12);
+    }
+
+    /* --- Modal / Sheet --- */
+    .modalBackdrop{
+      position:fixed;
+      inset:0;
+      z-index: 20000;
+      background: var(--overlay2);
+      backdrop-filter: blur(18px) saturate(1.2);
+      -webkit-backdrop-filter: blur(18px) saturate(1.2);
+      display:none;
+      padding: 14px;
+      padding-top: max(14px, env(safe-area-inset-top));
+      padding-bottom: max(14px, env(safe-area-inset-bottom));
+    }
+    .modalBackdrop.show{ display:flex; }
+    .modal{
+      width: min(720px, 100%);
+      margin: 0 auto;
+      border-radius: 22px;
+      border:1px solid var(--line);
+      background: var(--card);
+      box-shadow: var(--shadow);
+      overflow:hidden;
+      display:flex;
+      flex-direction:column;
+      max-height: 100%;
+    }
+    .modalHead{
+      padding: 14px 14px 10px;
+      display:flex;
+      justify-content:space-between;
+      align-items:flex-start;
+      gap:10px;
+      border-bottom: 1px solid var(--line);
+    }
+    .modalHead .h{
+      font-size: 16px;
+      font-weight: 950;
+      letter-spacing:-.2px;
+    }
+    .modalBody{
+      padding: 14px;
+      overflow:auto;
+    }
+    .closeX{
+      border:1px solid var(--line);
+      background: var(--card2);
+      color: var(--text);
+      width: 40px; height: 40px;
+      border-radius: 14px;
+      display:grid; place-items:center;
+      cursor:pointer;
+    }
+    .closeX:active{ transform: scale(.98); background: var(--tap); }
+
+    /* --- Signature canvas --- */
+    .sigWrap{
+      border:1px solid var(--line);
+      border-radius: 16px;
+      overflow:hidden;
+      background: var(--card);
+    }
+    .inputArea{
+      width:100%;
+      border-radius:16px;
+      border:1px solid var(--line);
+      background: var(--card);
+      color: var(--text);
+      padding: 12px 12px;
+      font-weight:800;
+      outline:none;
+      resize: vertical;
+    }
+    .input{
+      width:100%;
+      border-radius:16px;
+      border:1px solid var(--line);
+      background: var(--card);
+      color: var(--text);
+      padding: 12px 12px;
+      font-weight:800;
+      outline:none;
+    }
+    .errorText{
+      color: var(--danger);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    canvas{
+      display:block;
+      width: 100%;
+      height: 160px;
+      touch-action: none;
+    }
+
+    /* --- Toast --- */
+    .toast{
+      position:fixed;
+      left: 50%;
+      transform: translateX(-50%);
+      bottom: max(18px, env(safe-area-inset-bottom));
+      z-index: 30000;
+      padding: 10px 14px;
+      border-radius: 999px;
+      border:1px solid var(--line);
+      background: var(--card2);
+      box-shadow: var(--shadow);
+      font-weight: 900;
+      display:none;
+    }
+    .toast.show{ display:block; }
+
+    .hidden{ display:none !important; }
+
+    .participantList{
+      display:flex;
+      flex-direction:column;
+      gap:8px;
+    }
+    .participant{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      background: var(--card2);
+      border: 1px solid var(--line);
+    }
+    .participantName{
+      font-weight: 800;
+      font-size: 13px;
+    }
+    .participantMeta{
+      font-size: 11px;
+      color: var(--muted2);
+    }
+    .emptyState{
+      padding: 12px 10px;
+      border-radius: 14px;
+      border: 1px dashed var(--line);
+      background: var(--card2);
+      text-align:center;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="wrap">
+    <div class="topbar">
+      <div class="title">
+        <h1>Подтверждение наличных</h1>
+        <div class="sub">
+          <span id="statusLine" class="statusLine">Подключение…</span>
+          <span id="roleChip" class="chip hidden"></span>
+        </div>
+      </div>
+      <div class="actions">
+        <button id="themeBtn" class="iconBtn" type="button" title="Тема">
+          <span class="material-symbols-rounded" id="themeIcon">dark_mode</span>
+        </button>
+        <button id="refreshBtn" class="iconBtn" type="button" title="Обновить">
+          <span class="material-symbols-rounded">refresh</span>
+        </button>
+
+      </div>
+    </div>
+
+    <div id="loginCard" class="card cardPad hidden">
+      <div class="label">Вход</div>
+      <div class="field">
+        <div class="label">Логин</div>
+        <input id="loginInput" class="input" type="text" autocomplete="username" />
+      </div>
+      <div class="field">
+        <div class="label">Пароль</div>
+        <input id="passwordInput" class="input" type="password" autocomplete="current-password" />
+      </div>
+      <div id="loginError" class="errorText hidden"></div>
+      <div class="sp8"></div>
+      <button id="loginBtn" class="btn btnPrimary" type="button">Войти</button>
+    </div>
+
+
+    <div class="card cardPad">
+      <div class="seg" role="tablist" aria-label="Разделы">
+        <button id="tabRequests" class="active" type="button" role="tab" aria-selected="true">Запросы</button>
+        <button id="tabHistory" type="button" role="tab" aria-selected="false">История</button>
+      </div>
+
+      <div class="sp12"></div>
+
+      <!-- Filters -->
+      <div class="row">
+        <div class="field">
+          <div class="label">Счёт</div>
+          <div class="dropdown" data-dd="account">
+            <select id="accountSel" class="hidden">
+              <option value="">Все</option>
+              <option value="main">MAIN • Основной</option>
+              <option value="praise">PRAISE • Хвала</option>
+              <option value="alpha">ALPHA • Альфа</option>
+            </select>
+            <button class="ddTrigger" type="button" aria-expanded="false">
+              <span class="ddValue" id="accountLabel">Все</span>
+              <svg class="ddChevron" viewBox="0 0 24 24" fill="none">
+                <path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="field" style="min-width:210px">
+          <div class="label">Показывать</div>
+          <div class="dropdown" data-dd="scope">
+            <select id="scopeSel" class="hidden">
+              <option value="open">Ожидают моей подписи</option>
+              <option value="all">Все</option>
+            </select>
+            <button class="ddTrigger" type="button" aria-expanded="false">
+              <span class="ddValue" id="scopeLabel">Ожидают моей подписи</span>
+              <svg class="ddChevron" viewBox="0 0 24 24" fill="none">
+                <path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="sp12"></div>
+
+      <!-- Lists -->
+      <div id="listWrap" class="list"></div>
+      <div id="emptyWrap" class="muted small emptyState hidden">Нет запросов.</div>
+    </div>
+  </div>
+
+  <!-- Detail modal -->
+  <div id="detailBackdrop" class="modalBackdrop" role="dialog" aria-modal="true" aria-hidden="true">
+    <div class="modal">
+      <div class="modalHead">
+        <div>
+          <div class="h" id="detailTitle">Запрос</div>
+          <div class="muted small" id="detailSub"></div>
+        </div>
+        <button id="detailClose" class="closeX" type="button" aria-label="Закрыть">✕</button>
+      </div>
+      <div class="modalBody">
+        <div id="detailInfo" class="muted small"></div>
+        <div class="sp12"></div>
+
+        <div id="sigBlock">
+          <div class="label">Подпись</div>
+          <div class="sigWrap">
+            <canvas id="sigCanvas"></canvas>
+          </div>
+          <div class="sp8"></div>
+          <div class="row">
+            <button id="sigClear" class="btn btnGhost" type="button">Очистить</button>
+            <button id="sigSend" class="btn btnPrimary" type="button" disabled>Подписать</button>
+          </div>
+
+          <div class="sp12"></div>
+          <div class="label">Отказ</div>
+          <textarea id="refuseReason" rows="3" class="inputArea" placeholder="Причина отказа (обязательно)"></textarea>
+          <div class="sp8"></div>
+          <button id="refuseBtn" class="btn btnDanger" type="button">Отказаться</button>
+        </div>
+
+        <div id="finalBlock" class="hidden">
+          <div class="badge">Вы уже ответили на этот запрос</div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script>
+    /**********************
+     * Telegram + Theme (как в основном WebApp)
+     **********************/
+    const tg = window.Telegram?.WebApp;
+    const ThemeState = {
+      mode: "auto", // auto|dark|light
+      media: window.matchMedia?.("(prefers-color-scheme: dark)")
+    };
+
+    const tgThemeParams = tg?.themeParams || {};
+
+    function detectTelegramTheme(){
+      try{
+        if (!tgThemeParams.bg_color) return null;
+        const hex = tgThemeParams.bg_color.replace("#","");
+        if (hex.length !== 6) return null;
+        const r = parseInt(hex.slice(0,2),16);
+        const g = parseInt(hex.slice(2,4),16);
+        const b = parseInt(hex.slice(4,6),16);
+        const lum = 0.2126*r + 0.7152*g + 0.0722*b;
+        return (lum > 180) ? "light" : "dark";
+      }catch{ return null; }
+    }
+
+    function hexToRgba(hex, a){
+      try{
+        const h = String(hex||"").replace("#","");
+        const r = parseInt(h.slice(0,2),16);
+        const g = parseInt(h.slice(2,4),16);
+        const b = parseInt(h.slice(4,6),16);
+        return `rgba(${r},${g},${b},${a})`;
+      }catch{ return ""; }
+    }
+
+    function applyTelegramThemeVars(theme){
+      // применяем параметры Telegram только в тёмной теме (чтобы не ломать светлую)
+      const root = document.documentElement.style;
+      if (theme !== "dark"){
+        root.removeProperty("--bg");
+        root.removeProperty("--card");
+        root.removeProperty("--card2");
+        root.removeProperty("--text");
+        root.removeProperty("--muted");
+        root.removeProperty("--muted2");
+        return;
+      }
+      if (tgThemeParams.bg_color) root.setProperty("--bg", tgThemeParams.bg_color);
+      if (tgThemeParams.secondary_bg_color){
+        root.setProperty("--card", hexToRgba(tgThemeParams.secondary_bg_color, .65));
+        root.setProperty("--card2", hexToRgba(tgThemeParams.secondary_bg_color, .75));
+      }
+      if (tgThemeParams.text_color) root.setProperty("--text", hexToRgba(tgThemeParams.text_color, .92));
+      if (tgThemeParams.hint_color){
+        root.setProperty("--muted", hexToRgba(tgThemeParams.hint_color, .72));
+        root.setProperty("--muted2", hexToRgba(tgThemeParams.hint_color, .5));
+      }
+    }
+
+    function applyTheme(mode){
+      const normalized = String(mode || "auto").toLowerCase();
+      ThemeState.mode = (normalized === "system") ? "auto" : normalized;
+
+      let theme = ThemeState.mode;
+      if (theme === "auto"){
+        theme = detectTelegramTheme() || (ThemeState.media?.matches ? "dark" : "light");
+      }
+
+      document.documentElement.dataset.theme = theme;
+      applyTelegramThemeVars(theme);
+      localStorage.setItem("cashapp_theme", ThemeState.mode);
+
+      // иконка темы
+      const ic = document.getElementById("themeIcon");
+      if (ic) ic.textContent = (theme === "dark") ? "dark_mode" : "light_mode";
+
+      updateSignatureStyle();
+    }
+
+    function updateSignatureStyle(){
+      if (!Pad?.ctx) return;
+      const styles = getComputedStyle(document.documentElement);
+      const stroke = styles.getPropertyValue("--signature-stroke").trim() || "#0f172a";
+      Pad.ctx.strokeStyle = stroke;
+    }
+
+    function initTheme(){
+      const saved = localStorage.getItem("cashapp_theme");
+      if (saved === "dark" || saved === "light" || saved === "auto"){
+        applyTheme(saved);
+      } else {
+        applyTheme("auto");
+      }
+    }
+
+    // ВАЖНО: готовим Telegram WebApp (без этого часто нет initData/объекта)
+    if (tg){
+      try{ tg.ready(); }catch{}
+      try{ tg.expand(); }catch{}
+    }
+
+    ThemeState.media?.addEventListener?.("change", ()=>{
+      if (ThemeState.mode === "auto") applyTheme("auto");
+    });
+
+
+
+    /**********************
+     * API helper
+     **********************/
+    const API = {
+      baseUrl: (() => {
+        const params = new URLSearchParams(location.search);
+        const apiParam = params.get("api");
+        if (apiParam && apiParam.trim()){
+          try{
+            const parsed = new URL(apiParam, location.origin);
+            return (parsed.origin + parsed.pathname).replace(/\/$/, "");
+          }catch{
+            return apiParam.replace(/\/$/, "");
+          }
+        }
+        return location.origin;
+      })(),
+      token: null,
+      setToken(token){
+        this.token = token || null;
+        if (token){
+          localStorage.setItem("cashapp_token", token);
+        }
+      },
+      clearToken(){
+        this.token = null;
+        localStorage.removeItem("cashapp_token");
+      },
+      async req(method, path, body){
+        const headers = { "Content-Type": "application/json" };
+        let url = this.baseUrl + path;
+        if (this.token){
+          headers.Authorization = `Bearer ${this.token}`;
+          const sep = url.includes("?") ? "&" : "?";
+          url += `${sep}token=${encodeURIComponent(this.token)}`;
+        }
+        const res = await fetch(url, {
+          method,
+          headers,
+          credentials: "include",
+          body: body ? JSON.stringify(body) : undefined,
+        });
+
+        const txt = await res.text();
+        let data = null;
+        try{ data = txt ? JSON.parse(txt) : null; } catch { data = txt; }
+        if (!res.ok){
+          if (res.status === 401){
+            this.clearToken();
+            throw new Error("Требуется авторизация");
+          }
+          if (res.status === 403){
+            throw new Error("Недостаточно прав для доступа");
+          }
+          const msg = (data && data.detail) ? data.detail : (typeof data === "string" ? data : "Ошибка запроса");
+          throw new Error(msg);
+        }
+        return data;
+      },
+      get(p){ return this.req("GET", p); },
+      post(p,b){ return this.req("POST", p, b); },
+    };
+
+    /**********************
+     * UI helpers
+     **********************/
+    const $ = (id)=>document.getElementById(id);
+
+    function toast(msg){
+      const t = $("toast");
+      t.textContent = msg;
+      t.classList.add("show");
+      clearTimeout(toast._t);
+      toast._t = setTimeout(()=> t.classList.remove("show"), 2400);
+    }
+
+    function updateSignatureReady(ready){
+      const btn = $("sigSend");
+      if (!btn) return;
+      btn.disabled = !ready;
+      btn.setAttribute("aria-disabled", ready ? "false" : "true");
+    }
+
+
+    function fmtMoney(n){
+      const x = Number(n||0);
+      return x.toLocaleString("ru-RU", {minimumFractionDigits:2, maximumFractionDigits:2});
+    }
+    function fmtAccount(a){
+      const v = (a||"").toLowerCase();
+      if (v==="main") return "MAIN • Основной";
+      if (v==="praise") return "PRAISE • Хвала";
+      if (v==="alpha") return "ALPHA • Альфа";
+      return a || "—";
+    }
+    function fmtOp(t){
+      const v = (t||"").toLowerCase();
+      if (v==="withdraw") return "Изъятие";
+      if (v==="collect") return "Сбор";
+      return t || "—";
+    }
+    function fmtDateTime(iso){
+      try{
+        const d = new Date(iso);
+        return d.toLocaleString("ru-RU", {day:"2-digit", month:"2-digit", year:"numeric", hour:"2-digit", minute:"2-digit"});
+      }catch{ return iso || "—"; }
+    }
+    const STATUS_LABELS = {
+      PENDING_SIGNERS: "Ожидают подписантов",
+      PENDING_ADMIN: "Ожидает админа",
+      SIGNED: "Подписано",
+      REFUSED: "Отказано",
+      CANCELLED: "Отменено",
+    };
+    function fmtStatus(status){
+      const key = String(status || "").toUpperCase();
+      return STATUS_LABELS[key] || String(status || "—").replaceAll("_"," ");
+    }
+    function statusTone(status){
+      const key = String(status || "").toUpperCase();
+      if (key.includes("SIGNED") || key.includes("APPROVED")) return "ok";
+      if (key.includes("REFUSED") || key.includes("REJECT") || key.includes("CANCEL")) return "danger";
+      if (key.includes("PENDING") || key.includes("WAIT")) return "warn";
+      return "";
+    }
+
+    function setStatus(text, tone){
+      const el = $("statusLine");
+      el.textContent = text;
+      el.classList.toggle("is-error", tone === "error");
+      el.classList.toggle("is-success", tone === "success");
+    }
+    function applyUser(me){
+      State.me = me;
+      $("roleChip").textContent = `${me.name || me.login || "Пользователь"} • ${me.role || "—"}`;
+      $("roleChip").classList.remove("hidden");
+    }
+    /**********************
+     * Fancy Dropdown (portal)
+     **********************/
+    function makeDropdown(selectId, labelId){
+      const sel = $(selectId);
+      const root = sel.closest(".dropdown");
+      const btn = root.querySelector(".ddTrigger");
+      const label = $(labelId);
+
+      function syncLabel(){
+        const opt = sel.options[sel.selectedIndex];
+        label.textContent = opt ? opt.textContent : "—";
+      }
+
+      let portal = null;
+      let panel = null;
+      let open = false;
+
+      function buildPanel(){
+        portal = document.createElement("div");
+        portal.className = "ddPortal";
+        panel = document.createElement("div");
+        panel.className = "ddPanel";
+        const list = document.createElement("div");
+        list.className = "ddList";
+
+        Array.from(sel.options).forEach((o)=>{
+          const b = document.createElement("button");
+          b.type = "button";
+          b.className = "ddOpt";
+          b.dataset.value = o.value;
+          b.textContent = o.textContent;
+          b.addEventListener("click", ()=>{
+            sel.value = o.value;
+            sel.dispatchEvent(new Event("change", {bubbles:true}));
+            close();
+          });
+          list.appendChild(b);
+        });
+
+        panel.appendChild(list);
+        portal.appendChild(panel);
+        document.body.appendChild(portal);
+
+        // Close on backdrop click
+        portal.addEventListener("click", (e)=>{
+          if (e.target === portal) close();
+        });
+      }
+
+      function position(){
+        if (!panel) return;
+        const r = btn.getBoundingClientRect();
+        const vw = Math.max(document.documentElement.clientWidth, window.innerWidth || 0);
+        const vh = Math.max(document.documentElement.clientHeight, window.innerHeight || 0);
+
+        const margin = 10;
+        const width = Math.min(Math.max(r.width, 260), vw - margin*2);
+        let left = Math.min(Math.max(r.left, margin), vw - width - margin);
+
+        const spaceBelow = vh - r.bottom - margin;
+        const spaceAbove = r.top - margin;
+        const wantHeight = Math.min(360, Math.floor(vh * 0.52));
+
+        // если места мало — показываем панель как "лист" (почти полноэкранно)
+        const minUsable = 180;
+        const preferDown = spaceBelow >= spaceAbove;
+        const dirUp = !preferDown;
+        const available = dirUp ? spaceAbove : spaceBelow;
+
+        panel.style.left = left + "px";
+        panel.style.width = width + "px";
+
+        if (available < minUsable){
+          panel.style.left = margin + "px";
+          panel.style.width = (vw - margin*2) + "px";
+          panel.style.top = margin + "px";
+          panel.style.bottom = margin + "px";
+          panel.style.maxHeight = (vh - margin*2) + "px";
+          return;
+        }
+
+        const maxH = Math.min(wantHeight, Math.max(80, available - 8));
+        panel.style.maxHeight = maxH + "px";
+
+        if (dirUp){
+          panel.style.top = "auto";
+          panel.style.bottom = (vh - r.top + 8) + "px";
+        } else {
+          panel.style.bottom = "auto";
+          panel.style.top = (r.bottom + 8) + "px";
+        }
+      }
+
+
+      function show(){
+        if (open) return;
+        open = true;
+        root.classList.add("open");
+        btn.setAttribute("aria-expanded","true");
+        buildPanel();
+        position();
+        requestAnimationFrame(()=> panel && panel.classList.add("show"));
+
+        window.addEventListener("resize", position, {passive:true});
+        window.addEventListener("scroll", position, {passive:true});
+        document.addEventListener("keydown", onKey);
+      }
+
+      function close(){
+        if (!open) return;
+        open = false;
+        root.classList.remove("open");
+        btn.setAttribute("aria-expanded","false");
+        window.removeEventListener("resize", position);
+        window.removeEventListener("scroll", position);
+        document.removeEventListener("keydown", onKey);
+
+        if (panel) panel.classList.remove("show");
+        const p = portal;
+        portal = null; panel = null;
+        setTimeout(()=>{
+          if (p && p.parentNode) p.parentNode.removeChild(p);
+        }, 180);
+      }
+
+      function onKey(e){
+        if (e.key === "Escape") close();
+      }
+
+      btn.addEventListener("click", (e)=>{
+        e.preventDefault();
+        e.stopPropagation();
+        open ? close() : show();
+      });
+
+      sel.addEventListener("change", syncLabel);
+      syncLabel();
+      return { close, syncLabel };
+    }
+
+    /**********************
+     * Signature pad
+     **********************/
+    const Pad = {
+      canvas: null,
+      ctx: null,
+      drawing: false,
+      last: null,
+      hasInk: false,
+      moved: false,
+      init(){
+        this.canvas = $("sigCanvas");
+        this.ctx = this.canvas.getContext("2d");
+
+        const supportsPointer = ("PointerEvent" in window);
+
+
+        const resize = ()=>{
+          const rect = this.canvas.getBoundingClientRect();
+          const dpr = window.devicePixelRatio || 1;
+          this.canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+          this.canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+          this.ctx.setTransform(dpr,0,0,dpr,0,0);
+          this.ctx.lineWidth = 2.4;
+          this.ctx.lineCap = "round";
+          updateSignatureStyle();
+        };
+        this.resize = resize;
+
+        const pos = (e)=>{
+          const rect = this.canvas.getBoundingClientRect();
+          const point = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0]) || e;
+          return { x: (point.clientX - rect.left), y: (point.clientY - rect.top) };
+        };
+
+        const start = (e)=>{
+          if (e.cancelable) e.preventDefault();
+          this.drawing = true;
+          this.last = pos(e);
+          this.moved = false;
+        };
+        const move = (e)=>{
+          if (!this.drawing) return;
+          if (e.cancelable) e.preventDefault();
+          const p = pos(e);
+          this.ctx.beginPath();
+          this.ctx.moveTo(this.last.x, this.last.y);
+          this.ctx.lineTo(p.x, p.y);
+          this.ctx.stroke();
+          this.last = p;
+          this.moved = true;
+          this.markInk();
+        };
+        const end = ()=>{
+          if (this.drawing && !this.moved && this.last){
+            this.ctx.beginPath();
+            this.ctx.moveTo(this.last.x, this.last.y);
+            this.ctx.lineTo(this.last.x + 0.1, this.last.y + 0.1);
+            this.ctx.stroke();
+            this.markInk();
+          }
+          this.drawing = false;
+          this.last = null;
+        };
+
+        if (supportsPointer){
+          this.canvas.addEventListener("pointerdown", (e)=>{ this.canvas.setPointerCapture(e.pointerId); start(e); });
+          this.canvas.addEventListener("pointermove", move);
+          this.canvas.addEventListener("pointerup", end);
+          this.canvas.addEventListener("pointercancel", end);
+        } else {
+          this.canvas.addEventListener("touchstart", start, { passive: false });
+          this.canvas.addEventListener("touchmove", move, { passive: false });
+          this.canvas.addEventListener("touchend", end);
+          this.canvas.addEventListener("touchcancel", end);
+          this.canvas.addEventListener("mousedown", start);
+          window.addEventListener("mousemove", move);
+          window.addEventListener("mouseup", end);
+        }
+
+        window.addEventListener("resize", resize);
+        setTimeout(resize, 0);
+        updateSignatureReady(false);
+      },
+      clear(){
+        if (!this.ctx) return;
+        this.ctx.clearRect(0,0,this.canvas.width, this.canvas.height);
+        this.hasInk = false;
+        this.moved = false;
+        updateSignatureReady(false);
+      },
+      dataUrl(){
+        return this.canvas.toDataURL("image/png");
+      },
+      markInk(){
+        if (!this.hasInk){
+          this.hasInk = true;
+          updateSignatureReady(true);
+        }
+      }
+    };
+
+    /**********************
+     * State + screens
+     **********************/
+    const State = {
+      me: null,
+      tab: "requests",
+      currentId: null,
+      dropdowns: {},
+    };
+
+    function setTab(tab){
+      State.tab = tab;
+      $("tabRequests").classList.toggle("active", tab==="requests");
+      $("tabHistory").classList.toggle("active", tab==="history");
+      $("tabRequests").setAttribute("aria-selected", tab==="requests" ? "true":"false");
+      $("tabHistory").setAttribute("aria-selected", tab==="history" ? "true":"false");
+      loadList().catch(e=> toast(String(e.message||e)));
+    }
+
+    function showDetail(show){
+      const b = $("detailBackdrop");
+      b.classList.toggle("show", !!show);
+      b.setAttribute("aria-hidden", show ? "false":"true");
+      document.body.style.overflow = show ? "hidden" : "";
+    }
+
+    async function loadList(){
+      $("emptyWrap").classList.add("hidden");
+      $("listWrap").innerHTML = '<div class="muted small">Загрузка…</div>';
+
+      const account = $("accountSel").value || "";
+      const scope = $("scopeSel").value || "open";
+
+      const q = new URLSearchParams();
+      if (account) q.set("account", account);
+      q.set("only_open", scope === "open" ? "true" : "false");
+
+      const data = await API.get(`/api/cashflow/requests/my?${q.toString()}`);
+      const items = (data && data.items) ? data.items : [];
+
+      if (!items.length){
+        $("listWrap").innerHTML = "";
+        $("emptyWrap").classList.remove("hidden");
+        return;
+      }
+
+      $("listWrap").innerHTML = "";
+      for (const it of items){
+        const el = document.createElement("div");
+        el.className = "item";
+        const tone = statusTone(it.status);
+        el.innerHTML = `
+          <div class="itemTop">
+            <div class="sum">${fmtMoney(it.amount)} ₽</div>
+            <span class="badge ${tone}">${fmtStatus(it.status)}</span>
+          </div>
+          <div class="itemMeta">
+            <span>${fmtOp(it.op_type)}</span>
+            <span>•</span>
+            <span>${fmtAccount(it.account)}</span>
+            <span>•</span>
+            <span>${fmtDateTime(it.created_at)}</span>
+          </div>
+        `;
+        el.addEventListener("click", ()=> openDetail(it.id));
+        $("listWrap").appendChild(el);
+      }
+    }
+
+    async function openDetail(id){
+      State.currentId = id;
+      showDetail(true);
+      requestAnimationFrame(()=> Pad.resize?.());
+      $("detailInfo").textContent = "Загрузка…";
+      $("detailSub").textContent = "";
+      $("finalBlock").classList.add("hidden");
+      $("sigBlock").classList.remove("hidden");
+      Pad.clear();
+      updateSignatureReady(false);
+
+      const view = await API.get(`/api/cashflow/requests/${encodeURIComponent(id)}`);
+      const req = view.request;
+      const participants = view.participants || [];
+
+      $("detailTitle").textContent = `${fmtOp(req.op_type)} • ${fmtAccount(req.account)}`;
+      $("detailSub").textContent = `${fmtMoney(req.amount)} ₽ • ${fmtDateTime(req.created_at)} • ${fmtStatus(req.status)}`;
+
+      // check my state
+      const myId = State.me ? Number(State.me.telegram_id) : null;
+      const mePart = participants.find(p=> Number(p.telegram_id) === myId);
+      const myState = mePart ? (mePart.state || mePart.status || "") : "";
+      const upperState = String(myState || "").toUpperCase();
+      const needsRetry = upperState.includes("RETRY");
+      const already = (upperState.includes("SIGNED") || upperState.includes("REFUSED")) && !needsRetry;
+      if (already){
+        $("sigBlock").classList.add("hidden");
+        $("finalBlock").classList.remove("hidden");
+      }
+
+      let infoHtml = `
+        <div><b>Запрос #${req.id}</b></div>
+        <div class="sp8"></div>
+        <div class="muted small">Участники:</div>
+        <div class="sp8"></div>
+        <div class="participantList">
+      `;
+      for (const p of participants){
+        const state = p.state || p.status || "";
+        const tone = statusTone(state);
+        infoHtml += `
+          <div class="participant">
+            <div>
+              <div class="participantName">${p.name_snapshot || "—"}</div>
+              <div class="participantMeta">ID ${p.telegram_id || "—"}</div>
+            </div>
+            <span class="badge ${tone}">${fmtStatus(state)}</span>
+          </div>
+        `;
+      }
+      infoHtml += "</div>";
+      $("detailInfo").innerHTML = infoHtml;
+    }
+
+    async function signCurrent(){
+      const id = State.currentId;
+      if (!id) return;
+      if (!Pad.hasInk){
+        toast("Нарисуйте подпись перед отправкой");
+        return;
+      }
+      const sig = Pad.dataUrl();
+      await API.post(`/api/cashflow/requests/${encodeURIComponent(id)}/sign`, { signature: sig });
+      toast("Подписано");
+      showDetail(false);
+      await loadList();
+    }
+
+    async function refuseCurrent(){
+      const id = State.currentId;
+      if (!id) return;
+      const reason = ($("refuseReason").value || "").trim();
+      if (!reason){
+        toast("Укажите причину отказа");
+        return;
+      }
+      await API.post(`/api/cashflow/requests/${encodeURIComponent(id)}/refuse`, { reason });
+      toast("Отказ отправлен");
+      showDetail(false);
+      await loadList();
+    }
+
+    /**********************
+     * Auth + init
+     **********************/
+    async function authLogin(){
+      const login = ($("loginInput")?.value || "").trim();
+      const password = $("passwordInput")?.value || "";
+      if (!login || !password){
+        setLoginError("Введите логин и пароль");
+        return null;
+      }
+      setLoginError("");
+      setStatus("Авторизация…");
+      const res = await API.post("/api/auth/login", { login, password });
+      return res;
+    }
+
+    async function loadMe(){
+      const me = await API.get("/api/me");
+      applyUser(me);
+      setStatus("Готово", "success");
+      return me;
+    }
+
+    function setLoginError(message){
+      const el = $("loginError");
+      if (!el) return;
+      if (!message){
+        el.textContent = "";
+        el.classList.add("hidden");
+        return;
+      }
+      el.textContent = message;
+      el.classList.remove("hidden");
+    }
+
+    function toggleLoginCard(show){
+      const card = $("loginCard");
+      if (!card) return;
+      card.classList.toggle("hidden", !show);
+    }
+
+    async function ensureAuth(){
+
+      const stored = localStorage.getItem("cashapp_token");
+      if (stored){
+        API.setToken(stored);
+        try{
+          await loadMe();
+          toggleLoginCard(false);
+          return true;
+        }catch{
+          API.clearToken();
+        }
+      }
+      toggleLoginCard(true);
+      setStatus("Введите логин и пароль", "error");
+      return false;
+    }
+
+
+    // bind
+    $("tabRequests").addEventListener("click", ()=> setTab("requests"));
+    $("tabHistory").addEventListener("click", ()=> setTab("history"));
+
+    $("detailClose").addEventListener("click", ()=> showDetail(false));
+    $("detailBackdrop").addEventListener("click", (e)=>{ if (e.target === $("detailBackdrop")) showDetail(false); });
+
+    $("sigClear").addEventListener("click", ()=> Pad.clear());
+    $("sigSend").addEventListener("click", ()=> signCurrent().catch(e=> toast(String(e.message||e))));
+    $("refuseBtn").addEventListener("click", ()=> refuseCurrent().catch(e=> toast(String(e.message||e))));
+
+    $("refreshBtn").addEventListener("click", ()=>{
+      ensureAuth()
+        .then((ok)=> ok ? loadList() : Promise.resolve())
+        .then(()=> toast("Обновлено"))
+        .catch(e=> toast(String(e.message||e)));
+    });
+
+    $("loginBtn").addEventListener("click", async ()=>{
+      try{
+        const res = await authLogin();
+        if (!res || !res.token) return;
+        API.setToken(res.token);
+        if (res.user){
+          applyUser(res.user);
+        } else {
+          await loadMe();
+        }
+        toggleLoginCard(false);
+        setStatus("Готово", "success");
+        await loadList();
+      }catch(e){
+        setLoginError(String(e.message || e));
+        setStatus("Ошибка", "error");
+      }
+    });
+
+
+    $("themeBtn").addEventListener("click", ()=>{
+      const curTheme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+      applyTheme(curTheme === "dark" ? "light" : "dark");
+    });
+
+    (async function init(){
+      initTheme();
+      Pad.init();
+
+      State.dropdowns.account = makeDropdown("accountSel", "accountLabel");
+      State.dropdowns.scope = makeDropdown("scopeSel", "scopeLabel");
+
+      try{
+        const ok = await ensureAuth();
+        if (ok){
+          await loadList();
+        } else {
+          $("listWrap").innerHTML = "";
+          $("emptyWrap").textContent = "Нужна авторизация.";
+          $("emptyWrap").classList.remove("hidden");
+        }
+      }catch(e){
+        setStatus("Ошибка", "error");
+        toast(String(e.message||e));
+      }
+    })();
+  </script>
+</body>
+</html>
