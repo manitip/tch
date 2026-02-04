@@ -3711,6 +3711,9 @@
         if (apiParam && apiParam.trim()){
           try{
             const parsed = new URL(apiParam, location.origin);
+            if (location.protocol === "https:" && parsed.protocol === "http:"){
+              return location.origin;
+            }
             return (parsed.origin + parsed.pathname).replace(/\/$/, "");
           }catch{
             return apiParam.replace(/\/$/, "");

@@ -143,6 +143,19 @@ def require_https_webapp_url(url: str) -> Optional[str]:
         return None
     return url
 
+
+def require_https_app_url(url: str) -> Optional[str]:
+    if not url:
+        return None
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        return None
+    if parsed.scheme.lower() != "https":
+        return None
+    return url
+
+
 def cashapp_webapp_url() -> Optional[str]:
     primary = require_https_webapp_url(f"{CFG.APP_URL.rstrip('/')}/cashapp")
     if primary:
@@ -158,14 +171,16 @@ def cashapp_webapp_url() -> Optional[str]:
     try:
         parsed_cashapp = urllib.parse.urlparse(cashapp_url)
         query = urllib.parse.parse_qs(parsed_cashapp.query)
-        if CFG.APP_URL:
-            query["api"] = [CFG.APP_URL]
+        api_url = require_https_app_url(CFG.APP_URL)
+        if api_url:
+            query["api"] = [api_url]
         new_query = urllib.parse.urlencode(query, doseq=True)
         return urllib.parse.urlunparse(parsed_cashapp._replace(query=new_query))
     except Exception:
-        if CFG.APP_URL:
+        api_url = require_https_app_url(CFG.APP_URL)
+        if api_url:
             sep = "&" if "?" in cashapp_url else "?"
-            return f"{cashapp_url}{sep}api={urllib.parse.quote(CFG.APP_URL)}"
+            return f"{cashapp_url}{sep}api={urllib.parse.quote(api_url)}"
         return cashapp_url
 
 def build_webapp_url(screen: Optional[str] = None) -> Optional[str]:
@@ -177,8 +192,9 @@ def build_webapp_url(screen: Optional[str] = None) -> Optional[str]:
         query = urllib.parse.parse_qs(parsed.query)
         if screen:
             query["screen"] = [screen]
-        if CFG.APP_URL:
-            query["api"] = [CFG.APP_URL]
+        api_url = require_https_app_url(CFG.APP_URL)
+        if api_url:
+            query["api"] = [api_url]
         new_query = urllib.parse.urlencode(query, doseq=True)
         return urllib.parse.urlunparse(parsed._replace(query=new_query))
     except Exception:
@@ -186,8 +202,9 @@ def build_webapp_url(screen: Optional[str] = None) -> Optional[str]:
         extra: List[str] = []
         if screen:
             extra.append(f"screen={urllib.parse.quote(screen)}")
-        if CFG.APP_URL:
-            extra.append(f"api={urllib.parse.quote(CFG.APP_URL)}")
+        api_url = require_https_app_url(CFG.APP_URL)
+        if api_url:
+            extra.append(f"api={urllib.parse.quote(api_url)}")
         return f"{url}{sep}{'&'.join(extra)}" if extra else url
 
 
