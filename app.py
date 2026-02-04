@@ -3738,13 +3738,14 @@ def auth_register(body: AuthRegisterIn, request: Request):
     if existing_request and str(existing_request["status"]) == "pending":
         log_auth_event("register", login, request, "fail", "request_pending")
         raise HTTPException(status_code=400, detail="Registration request already pending")
-        now = iso_now(CFG.tzinfo())
-        if not admin_exists():
-            admin_sql = """
-                    INSERT INTO users (
-                        telegram_id, login, password_hash, name, team, role, active, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
-        """
+
+    now = iso_now(CFG.tzinfo())
+    if not admin_exists():
+        admin_sql = """
+                INSERT INTO users (
+                    telegram_id, login, password_hash, name, team, role, active, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+    """
         admin_params = (
             next_virtual_telegram_id(),
             login,
