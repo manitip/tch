@@ -3719,36 +3719,31 @@ def auth_login(body: AuthLoginIn, request: Request):
     log_auth_event("login", login, request, "success", user_id=int(row["id"]))
     return make_auth_response(row)
 
-    @APP.post("/api/auth/register")
-    def auth_register(body: AuthRegisterIn, request: Request):
-        login = body.login.strip()
-        if not login:
-            log_auth_event("register", login, request, "fail", "missing_login")
-            raise HTTPException(status_code=400, detail="Login is required")
-        if not body.password.strip():
-            log_auth_event("register", login, request, "fail", "missing_password")
-            raise HTTPException(status_code=400, detail="Password is required")
-        if db_fetchone("SELECT id FROM users WHERE login=?;", (login,)):
-            log_auth_event("register", login, request, "fail", "login_exists")
-            raise HTTPException(status_code=400, detail="Login already exists")
-        existing_request = db_fetchone(
-            "SELECT id, status FROM registration_requests WHERE login=?;",
-            (login,),
-        )
-        if existing_request and str(existing_request["status"]) == "pending":
-            log_auth_event("register", login, request, "fail", "request_pending")
-            raise HTTPException(status_code=400, detail="Registration request already pending")
-
+@APP.post("/api/auth/register")
+def auth_register(body: AuthRegisterIn, request: Request):
+    login = body.login.strip()
+    if not login:
+        log_auth_event("register", login, request, "fail", "missing_login")
+        raise HTTPException(status_code=400, detail="Login is required")
+    if not body.password.strip():
+        log_auth_event("register", login, request, "fail", "missing_password")
+        raise HTTPException(status_code=400, detail="Password is required")
+    if db_fetchone("SELECT id FROM users WHERE login=?;", (login,)):
+        log_auth_event("register", login, request, "fail", "login_exists")
+        raise HTTPException(status_code=400, detail="Login already exists")
+    existing_request = db_fetchone(
+        "SELECT id, status FROM registration_requests WHERE login=?;",
+        (login,),
+    )
+    if existing_request and str(existing_request["status"]) == "pending":
+        log_auth_event("register", login, request, "fail", "request_pending")
+        raise HTTPException(status_code=400, detail="Registration request already pending")
         now = iso_now(CFG.tzinfo())
         if not admin_exists():
-            new_id = db_exec_returning_id(
-
-        now = iso_now(CFG.tzinfo())
-        if not admin_exists():
-            new_id = db_exec_returning_id(
-            """
-            INSERT INTO users (telegram_id, login, password_hash, name, team, role, active, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+            admin_sql = """
+                    INSERT INTO users (
+                        telegram_id, login, password_hash, name, team, role, active, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         admin_params = (
             next_virtual_telegram_id(),
