@@ -68,6 +68,58 @@ except Exception:  # pragma: no cover
 from pathlib import Path
 from dotenv import load_dotenv
 
+import logging
+import uuid
+
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+
+AUTH_LOG = logging.getLogger("AUTH")
+
+
+def _mask_value(v: Optional[str]) -> str:
+    s = (v or "").strip()
+    if not s:
+        return "—"
+    if len(s) <= 10:
+        return "****"
+    return f"{s[:4]}…{s[-4:]}"
+
+
+def _mask_bearer(auth_header: str) -> str:
+    h = (auth_header or "").strip()
+    if not h:
+        return "—"
+    if h.lower().startswith("bearer "):
+        return "Bearer " + _mask_value(h.split(" ", 1)[1].strip())
+    return _mask_value(h)
+
+
+def _req_meta(request: Optional[Request]) -> Dict[str, Any]:
+    if not request:
+        return {}
+    return {
+        "path": request.url.path,
+        "method": request.method,
+        "client": (request.client.host if request.client else None),
+        "ua": request.headers.get("user-agent"),
+        "rid": getattr(request.state, "rid", None),
+        "auth": _mask_bearer(request.headers.get("authorization", "")),
+        "token_qs": _mask_value(request.query_params.get("token", "")),
+        "ref": request.headers.get("referer"),
+        "origin": request.headers.get("origin"),
+    }
+
+
+def auth_log(event: str, request: Optional[Request], **fields: Any) -> None:
+    meta = _req_meta(request)
+    meta.update(fields)
+    AUTH_LOG.info("%s | %s", event, json.dumps(meta, ensure_ascii=False))
+
+
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
 
@@ -1508,21 +1560,66 @@ def make_session_token(payload: Dict[str, Any], secret: str) -> str:
     return f"{body}.{_b64url_encode(sig)}"
 
 
-def verify_session_token(token: str, secret: str) -> Dict[str, Any]:
+def verify_session_token(token: str, secret: str, request: Optional[Request] = None) -> Dict[str, Any]:
+    """
+    HMAC signed JSON token:
+      token = base64url(json_payload) + "." + base64url(hmac_sha256(body))
+    """
+    tok = (token or "").strip()
+    if not tok:
+        if request:
+            auth_log("session_empty_token", request)
+        raise HTTPException(status_code=401, detail="Missing token")
+
     try:
-        body, sig = token.split(".", 1)
+        body, sig = tok.split(".", 1)
     except ValueError:
+        if request:
+            auth_log("session_bad_format", request, token=_mask_value(tok))
         raise HTTPException(status_code=401, detail="Invalid token format")
 
-    expected = hmac.new(secret.encode("utf-8"), body.encode("utf-8"), hashlib.sha256).digest()
-    if not hmac.compare_digest(_b64url_decode(sig), expected):
+    # signature decode + compare
+    try:
+        expected = hmac.new(secret.encode("utf-8"), body.encode("utf-8"), hashlib.sha256).digest()
+        sig_bytes = _b64url_decode(sig)
+    except Exception as e:
+        if request:
+            auth_log("session_sig_decode_error", request, err=str(e), sig=_mask_value(sig))
         raise HTTPException(status_code=401, detail="Invalid token signature")
 
-    payload = json.loads(_b64url_decode(body).decode("utf-8"))
-    exp = int(payload.get("exp", 0))
-    if exp and int(time.time()) > exp:
+    if not hmac.compare_digest(sig_bytes, expected):
+        if request:
+            auth_log(
+                "session_sig_mismatch",
+                request,
+                body_prefix=(body[:18] + "…") if len(body) > 18 else body,
+                sig=_mask_value(sig),
+            )
+        raise HTTPException(status_code=401, detail="Invalid token signature")
+
+    # payload decode
+    try:
+        payload_raw = _b64url_decode(body).decode("utf-8")
+        payload = json.loads(payload_raw)
+    except Exception as e:
+        if request:
+            auth_log("session_payload_decode_error", request, err=str(e))
+        raise HTTPException(status_code=401, detail="Invalid token payload")
+
+    # exp check
+    try:
+        exp = int(payload.get("exp", 0) or 0)
+    except Exception:
+        exp = 0
+
+    now_ts = int(time.time())
+    if exp and now_ts > exp:
+        if request:
+            auth_log("session_expired", request, exp=exp, now=now_ts)
         raise HTTPException(status_code=401, detail="Token expired")
+
     return payload
+
 
 
 
@@ -2279,9 +2376,13 @@ def get_bearer_token(request: Request) -> str:
     if not h.lower().startswith("bearer "):
         token = request.query_params.get("token", "").strip()
         if token:
+            auth_log("bearer_from_query", request, token=_mask_value(token))
             return token
+        auth_log("bearer_missing", request)
         raise HTTPException(status_code=401, detail="Missing Authorization Bearer token")
-    return h.split(" ", 1)[1].strip()
+    token = h.split(" ", 1)[1].strip()
+    auth_log("bearer_from_header", request, token=_mask_value(token))
+    return token
 
 
 def clamp_magic_ttl(value: int) -> int:
@@ -2304,10 +2405,14 @@ def hash_magic_token(token: str) -> str:
 def get_magic_login_token(request: Request) -> str:
     h = request.headers.get("Authorization", "").strip()
     if h.lower().startswith("bearer "):
-        return h.split(" ", 1)[1].strip()
+        token = h.split(" ", 1)[1].strip()
+        auth_log("magic_from_header", request, token=_mask_value(token))
+        return token
     token = request.query_params.get("token", "").strip()
     if token:
+        auth_log("magic_from_query", request, token=_mask_value(token))
         return token
+    auth_log("magic_missing", request)
     raise HTTPException(status_code=401, detail="invalid_token")
 
 
@@ -2345,16 +2450,26 @@ def append_magic_token(url: str, token: str) -> str:
 
 
 def get_current_user(request: Request) -> sqlite3.Row:
-    token = get_bearer_token(request)
-    payload = verify_session_token(token, CFG.SESSION_SECRET)
+    try:
+        token = get_bearer_token(request)
+        payload = verify_session_token(token, CFG.SESSION_SECRET, request=request)
+    except HTTPException as e:
+        auth_log("session_invalid", request, status=e.status_code, detail=str(e.detail))
+        raise
+
     user_id = int(payload.get("user_id", 0))
     if not user_id:
+        auth_log("session_payload_no_user", request, payload=payload)
         raise HTTPException(status_code=401, detail="Invalid token payload")
 
     u = db_fetchone("SELECT * FROM users WHERE id=?;", (user_id,))
     if not u or not is_user_active_row(u):
+        auth_log("user_inactive_or_missing", request, user_id=user_id)
         raise HTTPException(status_code=403, detail="User not allowed / inactive")
+
+    auth_log("session_ok", request, user_id=user_id, role=str(u["role"]))
     return u
+
 
 
 def admin_exists() -> bool:
@@ -3756,6 +3871,66 @@ from cashflow_routes import (
     withdraw_act_xlsx as cashflow_withdraw_act_xlsx,
 )
 
+@APP.middleware("http")
+async def auth_debug_middleware(request: Request, call_next):
+    rid = uuid.uuid4().hex[:8]
+    request.state.rid = rid
+
+    path = request.url.path
+
+    # "Входные" логи — только важные точки, чтобы не шуметь
+    watch_in = (
+        path.startswith("/api/auth/")
+        or path == "/api/me"
+        or path == "/api/diag/log"
+        or path == "/webapp"
+        or path == "/cashapp"
+    )
+
+    t0 = time.time()
+    if watch_in:
+        auth_log("http_in", request)
+
+    response = None
+    err: Optional[Exception] = None
+    try:
+        response = await call_next(request)
+        return response
+    except Exception as e:
+        err = e
+        if watch_in:
+            AUTH_LOG.exception("http_exc rid=%s path=%s err=%s", rid, path, e)
+        raise
+    finally:
+        dt_ms = int((time.time() - t0) * 1000)
+        status = getattr(response, "status_code", None)
+
+        # "Выходные" логи:
+        # 1) всегда для watch_in
+        # 2) и обязательно для 401/403 на любых /api/*
+        need_out_log = watch_in or (path.startswith("/api/") and status in (401, 403)) or (err is not None)
+        if need_out_log:
+            auth_log("http_out", request, status=status, ms=dt_ms)
+
+            if path.startswith("/api/") and status in (401, 403):
+                # дублируем в system_logs, чтобы видеть в админке мониторинга
+                try:
+                    log_system_log(
+                        "WARN",
+                        "auth",
+                        f"{status} {request.method} {path}",
+                        details=_req_meta(request),
+                    )
+                except Exception:
+                    pass
+
+        # request id в ответ (удобно сопоставлять фронт/бек)
+        try:
+            if response is not None:
+                response.headers["X-Request-ID"] = rid
+        except Exception:
+            pass
+
 APP.include_router(cashflow_router)
 
 def _ensure_cashflow_routes() -> None:
@@ -3800,22 +3975,87 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 def health():
     return {"ok": True}
 
+from pydantic import BaseModel
+from typing import Any, Dict, Optional
+
+class DiagLogIn(BaseModel):
+    event: str
+    data: Dict[str, Any] = {}
+    href: Optional[str] = None
+    ts: Optional[int] = None
+
+@APP.post("/api/diag/log")
+async def diag_log(request: Request, body: DiagLogIn):
+    # 1) в AUTH stdout (как было)
+    auth_log("diag", request, event=body.event, data=body.data, href=body.href, ts=body.ts)
+
+    # 2) в system_logs (чтобы смотреть в админке)
+    try:
+        # не кладём "сырые" огромные объекты в details_json — сериализуем и обрезаем
+        data_json = ""
+        try:
+            data_json = json.dumps(body.data or {}, ensure_ascii=False)
+        except Exception:
+            data_json = str(body.data)
+
+        if len(data_json) > 2000:
+            data_json = data_json[:2000] + "…[truncated]"
+
+        details = {
+            "event": body.event,
+            "href": body.href,
+            "ts": body.ts,
+            "rid": getattr(request.state, "rid", None),
+            "ip": (request.client.host if request.client else None),
+            "ua": request.headers.get("user-agent"),
+            "origin": request.headers.get("origin"),
+            "ref": request.headers.get("referer"),
+            "data_json": data_json,
+        }
+        log_system_log("INFO", "webapp_diag", str(body.event), details=details)
+    except Exception:
+        pass
+
+    return {"ok": True}
+
 
 # (опционально) отдача webapp.html
 @APP.get("/webapp")
-def webapp():
+def webapp(request: Request):
+    auth_log(
+        "webapp_open",
+        request,
+        token_qs=_mask_value(request.query_params.get("token", "")),
+        api_qs=str(request.query_params.get("api") or ""),
+    )
+
     path = os.path.join(os.path.dirname(__file__), "webapp.html")
     if not os.path.exists(path):
         return JSONResponse({"detail": "webapp.html not found"}, status_code=404)
-    return FileResponse(path, media_type="text/html")
+    return FileResponse(
+        path,
+        media_type="text/html",
+        headers={"Cache-Control": "no-store, max-age=0, must-revalidate"},
+    )
 
 
 @APP.get("/cashapp")
-def cashapp():
+def cashapp(request: Request):
+    auth_log(
+        "cashapp_open",
+        request,
+        token_qs=_mask_value(request.query_params.get("token", "")),
+        api_qs=str(request.query_params.get("api") or ""),
+    )
+
     path = os.path.join(os.path.dirname(__file__), "cashapp.html")
     if not os.path.exists(path):
         return JSONResponse({"detail": "cashapp.html not found"}, status_code=404)
-    return FileResponse(path, media_type="text/html")
+    return FileResponse(
+        path,
+        media_type="text/html",
+        headers={"Cache-Control": "no-store, max-age=0, must-revalidate"},
+    )
 
 
 @APP.get("/favicon.ico")
@@ -3843,12 +4083,29 @@ def auth_magic_create(body: MagicCreateIn, request: Request):
 
 @APP.post("/api/auth/magic/exchange", response_model=AuthOut)
 def auth_magic_exchange(request: Request):
-    login_token = get_magic_login_token(request)
-    return exchange_magic_login_token(login_token, request)
+    auth_log("exchange_enter", request)
+    try:
+        login_token = get_magic_login_token(request)
+        out = exchange_magic_login_token(login_token, request)
+        auth_log(
+            "exchange_ok",
+            request,
+            issued_session=_mask_value(out.get("token")),
+            role=(out.get("user") or {}).get("role"),
+            user_id=(out.get("user") or {}).get("id"),
+        )
+        return out
+    except HTTPException as e:
+        auth_log("exchange_http_error", request, status=e.status_code, detail=str(e.detail))
+        raise
+    except Exception as e:
+        AUTH_LOG.exception("exchange_crash rid=%s err=%s", getattr(request.state, "rid", None), e)
+        raise
 
 
 @APP.get("/api/me")
-def me(u: sqlite3.Row = Depends(get_current_user)):
+def me(request: Request, u: sqlite3.Row = Depends(get_current_user)):
+    auth_log("me_ok", request, user_id=int(u["id"]), role=str(u["role"]))
     return {
         "id": u["id"],
         "telegram_id": u["telegram_id"],
@@ -3861,7 +4118,6 @@ def me(u: sqlite3.Row = Depends(get_current_user)):
         "role": u["role"],
         "is_active": u["is_active"],
     }
-
 
 
 

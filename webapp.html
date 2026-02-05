@@ -3624,6 +3624,59 @@
     }
 
 
+      const DEBUG_AUTH = true;
+
+      const maskTok = (t)=>{
+        t = String(t || "");
+        if (!t) return "—";
+        if (t.length <= 10) return "****";
+        return t.slice(0,4) + "…" + t.slice(-4);
+      };
+
+      const dlog = (...args)=>{ if (DEBUG_AUTH) console.log("[WEBAPP/AUTH]", ...args); };
+
+      window.addEventListener("error", (e)=>{
+        console.error("[WEBAPP][error]", e.message, e.error || e);
+      });
+      window.addEventListener("unhandledrejection", (e)=>{
+        console.error("[WEBAPP][unhandledrejection]", e.reason);
+      });
+
+      (() => {
+        const p = new URLSearchParams(location.search);
+        dlog("boot", {
+          href: location.href,
+          api: p.get("api"),
+          token_qs: maskTok(p.get("token")),
+          ua: navigator.userAgent,
+        });
+      })();
+
+
+      function diag(event, data = {}) {
+        try {
+          const payload = {
+            event,
+            data,
+            href: location.href,
+            ts: Date.now()
+          };
+
+          // максимально надёжно для WebView
+          if (navigator.sendBeacon) {
+            const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
+            navigator.sendBeacon("/api/diag/log", blob);
+            return;
+          }
+
+          fetch("/api/diag/log", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+            keepalive: true
+          }).catch(()=>{});
+        } catch {}
+      }
 
 
     const API = {
@@ -3648,15 +3701,27 @@
 
 
       async authMagic(loginToken){
+        dlog("authMagic:send", { loginToken: maskTok(loginToken), baseUrl: API.baseUrl });
+        diag("authMagic:enter", { hasLoginToken: !!loginToken });
+
         const res = await fetch(`${API.baseUrl}/api/auth/magic/exchange`,{
           method:"POST",
           headers: {"Authorization": `Bearer ${loginToken}`}
         });
+
+        diag("authMagic:response", { status: res.status });
+
         if (!res.ok) {
           const t = await res.text().catch(()=> "");
+          diag("authMagic:fail", { status: res.status, body: (t || "").slice(0, 200) });
           throw new Error(`${res.status}: ${t || "Unauthorized"}`);
         }
+
         const data = await res.json();
+
+        diag("authMagic:ok", { hasSessionToken: !!data.token, role: data.user?.role || null });
+        dlog("authMagic:ok", { sessionToken: maskTok(data.token), user: data.user ? {id:data.user.id, role:data.user.role} : null });
+
         API.token = data.token;
         API.user = data.user;
         localStorage.setItem("sessionToken", API.token);
@@ -3664,16 +3729,30 @@
         return data;
       },
 
+
       async ensureAuth(){
+        dlog("ensureAuth:start", { token: maskTok(API.token) });
+        diag("ensureAuth:enter", { hasToken: !!API.token });
+
         if (!API.token) {
+          diag("ensureAuth:missing_token");
           throw new Error("Missing session token");
         }
 
-        const me = await API.get("/api/me");
+        try{
+          const me = await API.get("/api/me");
+          diag("ensureAuth:me_ok", { id: me?.id || null, role: me?.role || null });
+          dlog("ensureAuth:me_ok", { id: me?.id, role: me?.role });
 
-        API.user = me;
-        return me;
+          API.user = me;
+          return me;
+        }catch(err){
+          diag("ensureAuth:me_fail", { err: String(err?.message || err) });
+          throw err;
+        }
       },
+
+
       async get(path){
         return API.req(path, {method:"GET"});
       },
@@ -3702,37 +3781,60 @@
         return API.req(path, {method:"DELETE"});
       },
       async req(path, opts={}){
+        const method = String(opts.method || "GET").toUpperCase();
+
         const headers = Object.assign({"Content-Type":"application/json"}, opts.headers||{});
         if (API.token) headers["Authorization"] = `Bearer ${API.token}`;
+
+        // Логируем только auth/ме — чтобы не заспамить
+        if (path.startsWith("/api/auth") || path === "/api/me") {
+          dlog("REQ", { method, path, baseUrl: API.baseUrl, token: maskTok(API.token) });
+          diag("req:send", { path, method, hasToken: !!API.token });
+        }
+
         const res = await fetch(`${API.baseUrl}${path}`, { ...opts, headers });
 
+        if (path.startsWith("/api/auth") || path === "/api/me") {
+          dlog("RES", { method, path, status: res.status });
+          diag("req:res", { path, status: res.status });
+        }
+
         if (res.status === 401 || res.status === 403) {
-          // bubble for caller to reauth UI if needed
           const txt = await res.text().catch(()=> "");
+          diag("req:auth_fail", { path, status: res.status, body: (txt || "").slice(0, 200) });
           throw new Error(`${res.status}: ${txt || "Unauthorized"}`);
         }
+
         if (!res.ok) {
           const txt = await res.text().catch(()=> "");
+          diag("req:fail", { path, status: res.status, body: (txt || "").slice(0, 200) });
           throw new Error(`${res.status}: ${txt || "Request failed"}`);
         }
+
         const ctype = (res.headers.get("content-type")||"");
         if (ctype.includes("application/json")) return res.json();
         return res.text();
-      }
-    };
+      },
 
-    function loadStoredSession(){
-      const storedToken = localStorage.getItem("sessionToken");
-      if (storedToken) API.token = storedToken;
-      const storedUser = localStorage.getItem("sessionUser");
-      if (storedUser) {
-        try{
-          API.user = JSON.parse(storedUser);
-        }catch{
-          API.user = null;
+
+      function loadStoredSession(){
+        const storedToken = localStorage.getItem("sessionToken");
+        if (storedToken) API.token = storedToken;
+
+        const storedUser = localStorage.getItem("sessionUser");
+        if (storedUser) {
+          try{
+            API.user = JSON.parse(storedUser);
+          }catch{
+            API.user = null;
+          }
         }
+
+        dlog("loadStoredSession", { token: maskTok(API.token), hasUser: !!API.user });
+        diag("loadStoredSession", { hasToken: !!API.token, hasUser: !!API.user });
       }
-    }
+
+
 
 
     function parseApiError(err){
