@@ -108,7 +108,6 @@ def _req_meta(request: Optional[Request]) -> Dict[str, Any]:
         "ua": request.headers.get("user-agent"),
         "rid": getattr(request.state, "rid", None),
         "auth": _mask_bearer(request.headers.get("authorization", "")),
-        "token_qs": _mask_value(request.query_params.get("token", "")),
         "ref": request.headers.get("referer"),
         "origin": request.headers.get("origin"),
     }
@@ -150,6 +149,7 @@ class Config:
     SESSION_SECRET: str
     MAGIC_LINK_SECRET: str
     MAGIC_LINK_TTL: int
+    ADMIN_BOOTSTRAP_SECRET: str
     TZ: str
 
     def tzinfo(self) -> ZoneInfo:
@@ -182,6 +182,7 @@ def load_config() -> Config:
         SESSION_SECRET=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)).strip(),
         MAGIC_LINK_SECRET=os.getenv("MAGIC_LINK_SECRET", os.getenv("SESSION_SECRET", "")).strip(),
         MAGIC_LINK_TTL=int(os.getenv("MAGIC_LINK_TTL", "120").strip() or "120"),
+        ADMIN_BOOTSTRAP_SECRET=os.getenv("ADMIN_BOOTSTRAP_SECRET", "").strip(),
         TZ=os.getenv("TIMEZONE", "Europe/Warsaw").strip(),
     )
 
@@ -339,6 +340,39 @@ def verify_password(raw_password: str, stored_hash: str) -> bool:
         return False
     dk = hashlib.pbkdf2_hmac("sha256", raw_password.encode("utf-8"), salt, 120_000)
     return hmac.compare_digest(dk, expected)
+
+LOGIN_RE = re.compile(r"^[a-zA-Z0-9._-]{4,32}$")
+PASSWORD_MIN_LEN = 12
+COMMON_PASSWORDS = {
+    "1234567890",
+    "123456789",
+    "12345678",
+    "1234567",
+    "123456",
+    "password",
+    "qwerty",
+    "qwerty123",
+    "1111111111",
+}
+
+
+def normalize_login(login: str) -> str:
+    return (login or "").strip().lower()
+
+
+def validate_login(login: str) -> None:
+    if not LOGIN_RE.match(login):
+        raise HTTPException(status_code=400, detail="invalid_login")
+
+
+def validate_password(raw_password: str) -> None:
+    pw = raw_password or ""
+    if len(pw) < PASSWORD_MIN_LEN:
+        raise HTTPException(status_code=400, detail="weak_password")
+    if pw.lower() in COMMON_PASSWORDS:
+        raise HTTPException(status_code=400, detail="weak_password")
+    if pw.isdigit():
+        raise HTTPException(status_code=400, detail="weak_password")
 
 
 def next_virtual_telegram_id() -> int:
@@ -925,7 +959,7 @@ def resolve_category(name: str, role: str, user_id: Optional[int] = None) -> str
     if existing:
         return str(existing["name"])
 
-    if role in ("admin", "accountant"):
+    if role in ("admin",):
         now = iso_now(CFG.tzinfo())
         new_id = db_exec_returning_id(
             """
@@ -999,7 +1033,7 @@ def set_expense_tags(
             if row:
                 resolved_ids.append(int(row["id"]))
                 continue
-            if role not in ("admin", "accountant"):
+            if role not in ("admin",):
                 raise HTTPException(status_code=403, detail="Insufficient role for tag creation")
             now = iso_now(CFG.tzinfo())
             cur = conn.execute(
@@ -2332,6 +2366,24 @@ def log_message_delivery(
         (kind, int(recipient_id), status, error, now),
     )
 
+class LoginRateLimiter:
+    def __init__(self, max_attempts: int = 8, window_sec: int = 300) -> None:
+        self.max_attempts = int(max_attempts)
+        self.window_sec = int(window_sec)
+        self._attempts: Dict[str, List[float]] = {}
+
+    def check(self, key: str) -> None:
+        now = time.time()
+        window_start = now - self.window_sec
+        attempts = [ts for ts in self._attempts.get(key, []) if ts >= window_start]
+        attempts.append(now)
+        self._attempts[key] = attempts
+        if len(attempts) > self.max_attempts:
+            raise HTTPException(status_code=429, detail="too_many_attempts")
+
+
+LOGIN_RATE_LIMITER = LoginRateLimiter()
+
 
 # ---------------------------
 # API Auth + roles
@@ -2341,6 +2393,46 @@ def log_message_delivery(
 class AuthOut(BaseModel):
     token: str
     user: Dict[str, Any]
+
+class AuthLoginIn(BaseModel):
+    login: str
+    password: str
+
+
+class AuthRegisterIn(BaseModel):
+    login: str
+    password: str
+    name: Optional[str] = None
+
+
+class AuthBootstrapIn(BaseModel):
+    login: str
+    password: str
+    name: Optional[str] = None
+
+
+class AdminUserCreateIn(BaseModel):
+    login: str
+    password: str
+    role: str
+    name: Optional[str] = None
+    team: Optional[str] = None
+    cash_scopes: Optional[str] = None
+    cash_ops: Optional[str] = None
+
+
+class AdminUserUpdateIn(BaseModel):
+    role: Optional[str] = None
+    is_active: Optional[bool] = None
+    name: Optional[str] = None
+    team: Optional[str] = None
+    cash_scopes: Optional[str] = None
+    cash_ops: Optional[str] = None
+
+
+class AdminResetPasswordIn(BaseModel):
+    password: str
+
 
 
 class MagicCreateIn(BaseModel):
@@ -2374,10 +2466,6 @@ def get_user_by_telegram_id(telegram_id: int, request: Optional[Request]) -> sql
 def get_bearer_token(request: Request) -> str:
     h = request.headers.get("Authorization", "").strip()
     if not h.lower().startswith("bearer "):
-        token = request.query_params.get("token", "").strip()
-        if token:
-            auth_log("bearer_from_query", request, token=_mask_value(token))
-            return token
         auth_log("bearer_missing", request)
         raise HTTPException(status_code=401, detail="Missing Authorization Bearer token")
     token = h.split(" ", 1)[1].strip()
@@ -2419,7 +2507,7 @@ def get_magic_login_token(request: Request) -> str:
 def get_magic_target_roles(target_app: str) -> Tuple[str, ...]:
     target = (target_app or "").strip().lower()
     if target == "webapp":
-        return ("owner", "admin", "manager", "assembler", "accountant", "viewer")
+        return ("owner", "admin", "viewer")
     if target == "cashapp":
         return ("owner", "admin", "cash_signer")
     raise HTTPException(status_code=400, detail="invalid_target_app")
@@ -2481,6 +2569,49 @@ def admin_exists() -> bool:
 def has_registered_web_users() -> bool:
     row = db_fetchone("SELECT id FROM users WHERE login NOT LIKE 'tg_%' LIMIT 1;")
     return bool(row)
+
+def create_user(
+    *,
+    login: str,
+    password: str,
+    role: str,
+    name: Optional[str] = None,
+    team: Optional[str] = None,
+) -> sqlite3.Row:
+    allowed_roles = {"admin", "viewer", "cash_signer"}
+    if role not in allowed_roles:
+        raise HTTPException(status_code=400, detail="invalid_role")
+    tz = CFG.tzinfo()
+    now = iso_now(tz)
+    login_norm = normalize_login(login)
+    validate_login(login_norm)
+    validate_password(password)
+    password_hash = hash_password(password)
+    telegram_id = next_virtual_telegram_id()
+    try:
+        user_id = db_exec_returning_id(
+            """
+            INSERT INTO users (telegram_id, login, password_hash, name, team, role, is_active, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?);
+            """,
+            (
+                int(telegram_id),
+                login_norm,
+                password_hash,
+                (name or "").strip() or None,
+                (team or "").strip() or None,
+                role,
+                now,
+                now,
+            ),
+        )
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=409, detail="login_already_exists")
+    row = db_fetchone("SELECT * FROM users WHERE id=?;", (int(user_id),))
+    if not row:
+        raise HTTPException(status_code=500, detail="user_create_failed")
+    return row
+
 
 
 def make_auth_response(row: sqlite3.Row) -> Dict[str, Any]:
@@ -2780,10 +2911,7 @@ def main_menu_kb(role: str) -> ReplyKeyboardMarkup:
     else:
         webapp_url = build_webapp_url()
         if webapp_url:
-            label = "Открыть дашборд" if normalized_role in ("admin", "accountant", "viewer") else "Пройти авторизацию"
-            buttons.append([KeyboardButton(text=label, web_app=WebAppInfo(url=webapp_url))])
-    if normalized_role in ("admin", "accountant", "viewer", "cash_signer"):
-        buttons.append([KeyboardButton(text="Войти по ссылке")])
+            buttons.append([KeyboardButton(text="Открыть дашборд", web_app=WebAppInfo(url=webapp_url))])
     return ReplyKeyboardMarkup(
         keyboard=buttons,
         resize_keyboard=True,
@@ -2965,7 +3093,7 @@ async def on_start(m: Message):
 
     role = get_user_role_from_db(tid)
     await m.answer(
-        "Для входа в систему нажмите «Пройти авторизацию».",
+        "Для входа в систему откройте дашборд через кнопку ниже.",
         reply_markup=main_menu_kb(role),
     )
     webapp_url = build_webapp_url()
@@ -2987,19 +3115,19 @@ async def on_text(m: Message):
     text = m.text.strip()
     role = get_user_role_from_db(tid)
     if text == "Быстрый ввод пожертвования":
-        if role not in ("admin", "accountant", "viewer"):
+        if role not in ("admin"):
             await m.answer("Нет доступа")
             return
         await m.answer("Отправьте сообщением: `пож 8500 4800` (безнал нал)", parse_mode="Markdown")
         return
     if text == "Быстрый ввод расхода":
-        if role not in ("admin", "accountant", "viewer"):
+        if role not in ("admin"):
             await m.answer("Нет доступа")
             return
         await m.answer("Отправьте сообщением: `расход 2500 зал`", parse_mode="Markdown")
         return
     if text == "Отчёты":
-        if role not in ("admin", "accountant", "viewer"):
+        if role not in ("admin"):
             await m.answer("Нет доступа")
             return
         await m.answer("Отчёты:", reply_markup=reports_kb())
@@ -3020,31 +3148,7 @@ async def on_text(m: Message):
         )
         return
 
-    if text == "Войти по ссылке":
-        target_app = "cashapp" if role == "cash_signer" else "webapp"
-        try:
-            token, ttl = create_magic_login_token(
-                telegram_id=int(tid),
-                target_app=target_app,
-                request=None,
-            )
-        except HTTPException as exc:
-            await m.answer(f"Ошибка: {exc.detail}")
-            return
-        base_url = build_magic_link_url(target_app)
-        if not base_url:
-            await m.answer("Ссылка недоступна. Проверьте настройки APP_URL/WEBAPP_URL.")
-            return
-        link = append_magic_token(base_url, token)
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="Открыть в браузере", url=link)]]
-        )
-        await m.answer(
-            f"Ваша ссылка для входа (действует {ttl} сек). "
-            "После открытия ссылка станет одноразовой.",
-            reply_markup=kb,
-        )
-        return
+
 
     parsed = parse_quick_input(m.text)
     if not parsed:
@@ -3164,7 +3268,7 @@ async def on_reports_menu(cq: CallbackQuery):
 
 
     role = get_user_role_from_db(tid)
-    if role not in ("admin", "accountant", "viewer"):
+    if role not in ("admin", "viewer"):
         await cq.answer("Нет роли", show_alert=True)
         return
 
@@ -3235,7 +3339,7 @@ async def on_confirm(cq: CallbackQuery):
         return
     user_id = int(user_row["id"])
     role = str(user_row["role"])
-    if role not in ("admin", "accountant"):
+    if role not in ("admin",):
         await cq.answer("Недостаточно прав для сохранения", show_alert=True)
         return
 
@@ -4070,37 +4174,72 @@ def favicon():
 
 
 
-@APP.post("/api/auth/magic/create")
-def auth_magic_create(body: MagicCreateIn, request: Request):
-    require_magic_create_secret(request)
-    token, ttl = create_magic_login_token(
-        telegram_id=int(body.telegram_id),
-        target_app=body.target_app,
-        request=request,
+@APP.post("/api/auth/login", response_model=AuthOut)
+def auth_login(body: AuthLoginIn, request: Request):
+    login_norm = normalize_login(body.login)
+    validate_login(login_norm)
+    key = f"{request.client.host if request.client else 'unknown'}|{login_norm}"
+    LOGIN_RATE_LIMITER.check(key)
+
+    row = db_fetchone("SELECT * FROM users WHERE login=?;", (login_norm,))
+    if not row or not is_user_active_row(row):
+        log_auth_event("login", login_norm, request, "fail", "invalid_credentials")
+        raise HTTPException(status_code=403, detail="invalid_credentials")
+    if not verify_password(body.password, str(row["password_hash"] or "")):
+        log_auth_event("login", login_norm, request, "fail", "invalid_credentials")
+        raise HTTPException(status_code=403, detail="invalid_credentials")
+
+    log_auth_event("login", login_norm, request, "success", user_id=int(row["id"]))
+    return make_auth_response(row)
+
+
+@APP.post("/api/auth/register", response_model=AuthOut, status_code=201)
+def auth_register(body: AuthRegisterIn, request: Request):
+    login_norm = normalize_login(body.login)
+    validate_login(login_norm)
+    validate_password(body.password)
+
+    row = create_user(
+        login=login_norm,
+        password=body.password,
+        role="viewer",
+        name=body.name,
     )
-    return {"login_token": token, "expires_in": ttl}
+    log_auth_event("register", login_norm, request, "success", user_id=int(row["id"]))
+    return make_auth_response(row)
 
 
-@APP.post("/api/auth/magic/exchange", response_model=AuthOut)
-def auth_magic_exchange(request: Request):
-    auth_log("exchange_enter", request)
-    try:
-        login_token = get_magic_login_token(request)
-        out = exchange_magic_login_token(login_token, request)
-        auth_log(
-            "exchange_ok",
-            request,
-            issued_session=_mask_value(out.get("token")),
-            role=(out.get("user") or {}).get("role"),
-            user_id=(out.get("user") or {}).get("id"),
-        )
-        return out
-    except HTTPException as e:
-        auth_log("exchange_http_error", request, status=e.status_code, detail=str(e.detail))
-        raise
-    except Exception as e:
-        AUTH_LOG.exception("exchange_crash rid=%s err=%s", getattr(request.state, "rid", None), e)
-        raise
+@APP.get("/api/auth/bootstrap/status")
+def auth_bootstrap_status():
+    return {
+        "admin_exists": admin_exists(),
+        "has_registered_web_users": has_registered_web_users(),
+    }
+
+
+@APP.post("/api/auth/bootstrap/create-admin", response_model=AuthOut)
+def auth_bootstrap_create_admin(body: AuthBootstrapIn, request: Request):
+    if admin_exists():
+        raise HTTPException(status_code=409, detail="admin_already_exists")
+    secret = CFG.ADMIN_BOOTSTRAP_SECRET
+    if not secret:
+        raise HTTPException(status_code=500, detail="bootstrap_secret_not_configured")
+    provided = (request.headers.get("x-admin-bootstrap-secret") or "").strip()
+    if not provided or not hmac.compare_digest(provided, secret):
+        raise HTTPException(status_code=401, detail="invalid_bootstrap_secret")
+
+    login_norm = normalize_login(body.login)
+    validate_login(login_norm)
+    validate_password(body.password)
+
+    row = create_user(
+        login=login_norm,
+        password=body.password,
+        role="admin",
+        name=body.name,
+    )
+    log_auth_event("bootstrap_admin", login_norm, request, "success", user_id=int(row["id"]))
+    return make_auth_response(row)
 
 
 @APP.get("/api/me")
@@ -4133,6 +4272,87 @@ def list_users(u: sqlite3.Row = Depends(require_role("admin"))):
     return {"items": [dict(r) for r in rows]}
 
 
+@APP.post("/api/admin/users", status_code=201)
+def create_admin_user(body: AdminUserCreateIn, request: Request, u: sqlite3.Row = Depends(require_role("admin"))):
+    login_norm = normalize_login(body.login)
+    validate_login(login_norm)
+    validate_password(body.password)
+    row = create_user(
+        login=login_norm,
+        password=body.password,
+        role=body.role,
+        name=body.name,
+        team=body.team,
+    )
+    if body.cash_scopes is not None or body.cash_ops is not None:
+        db_exec(
+            "UPDATE users SET cash_scopes=?, cash_ops=?, updated_at=? WHERE id=?;",
+            (
+                body.cash_scopes,
+                body.cash_ops,
+                iso_now(CFG.tzinfo()),
+                int(row["id"]),
+            ),
+        )
+        row = db_fetchone("SELECT * FROM users WHERE id=?;", (int(row["id"]),))
+    log_auth_event("admin_user_create", login_norm, request, "success", user_id=int(row["id"]))
+    return {"item": dict(row)}
+
+
+@APP.put("/api/admin/users/{user_id}")
+def update_admin_user(
+    user_id: int,
+    body: AdminUserUpdateIn,
+    request: Request,
+    u: sqlite3.Row = Depends(require_role("admin")),
+):
+    row = db_fetchone("SELECT * FROM users WHERE id=?;", (int(user_id),))
+    if not row:
+        raise HTTPException(status_code=404, detail="user_not_found")
+    updates: Dict[str, Any] = {}
+    if body.role is not None:
+        if body.role not in {"admin", "viewer", "cash_signer"}:
+            raise HTTPException(status_code=400, detail="invalid_role")
+        updates["role"] = body.role
+    if body.is_active is not None:
+        updates["is_active"] = 1 if body.is_active else 0
+    if body.name is not None:
+        updates["name"] = body.name.strip() or None
+    if body.team is not None:
+        updates["team"] = body.team.strip() or None
+    if body.cash_scopes is not None:
+        updates["cash_scopes"] = body.cash_scopes
+    if body.cash_ops is not None:
+        updates["cash_ops"] = body.cash_ops
+    if updates:
+        updates["updated_at"] = iso_now(CFG.tzinfo())
+        set_clause = ", ".join(f"{k}=?" for k in updates.keys())
+        params = list(updates.values()) + [int(user_id)]
+        db_exec(f"UPDATE users SET {set_clause} WHERE id=?;", tuple(params))
+    log_auth_event("admin_user_update", str(row["login"] or row["telegram_id"]), request, "success", user_id=int(row["id"]))
+    updated = db_fetchone("SELECT * FROM users WHERE id=?;", (int(user_id),))
+    return {"item": dict(updated) if updated else None}
+
+
+@APP.post("/api/admin/users/{user_id}/reset-password")
+def reset_admin_user_password(
+    user_id: int,
+    body: AdminResetPasswordIn,
+    request: Request,
+    u: sqlite3.Row = Depends(require_role("admin")),
+):
+    validate_password(body.password)
+    row = db_fetchone("SELECT * FROM users WHERE id=?;", (int(user_id),))
+    if not row:
+        raise HTTPException(status_code=404, detail="user_not_found")
+    password_hash = hash_password(body.password)
+    db_exec(
+        "UPDATE users SET password_hash=?, updated_at=? WHERE id=?;",
+        (password_hash, iso_now(CFG.tzinfo()), int(user_id)),
+    )
+    log_auth_event("admin_user_reset_password", str(row["login"] or row["telegram_id"]), request, "success", user_id=int(row["id"]))
+    return {"status": "ok"}
+
 
 
 # ---------------------------
@@ -4142,21 +4362,21 @@ def list_users(u: sqlite3.Row = Depends(require_role("admin"))):
 @APP.get("/api/months")
 def list_months(
     year: int = Query(...),
-    u: sqlite3.Row = Depends(require_role("admin", "accountant", "viewer")),
+    u: sqlite3.Row = Depends(require_role("admin", "viewer")),
 ):
     rows = db_fetchall("SELECT * FROM months WHERE year=? ORDER BY month ASC;", (year,))
     return {"items": [dict(r) for r in rows]}
 
 @APP.get("/api/months/latest")
 def latest_month(
-    u: sqlite3.Row = Depends(require_role("admin", "accountant", "viewer")),
+    u: sqlite3.Row = Depends(require_role("admin", "viewer")),
 ):
     row = db_fetchone("SELECT * FROM months ORDER BY year DESC, month DESC LIMIT 1;")
     return {"item": dict(row) if row else None}
 
 @APP.get("/api/months/latest")
 def latest_month(
-    u: sqlite3.Row = Depends(require_role("admin", "accountant", "viewer")),
+    u: sqlite3.Row = Depends(require_role("admin", "viewer")),
 ):
     row = db_fetchone("SELECT * FROM months ORDER BY year DESC, month DESC LIMIT 1;")
     return {"item": dict(row) if row else None}
@@ -4207,14 +4427,14 @@ def create_month(
 @APP.get("/api/months/{month_id}/summary")
 def month_summary(
     month_id: int,
-    u: sqlite3.Row = Depends(require_role("admin", "accountant", "viewer")),
+    u: sqlite3.Row = Depends(require_role("admin", "viewer")),
 ):
     return compute_month_summary(month_id, ensure_tithe=True, refresh_services=True)
 
 @APP.get("/api/months/{month_id}/budget")
 def list_month_budget(
     month_id: int,
-    u: sqlite3.Row = Depends(require_role("admin", "accountant", "viewer")),
+    u: sqlite3.Row = Depends(require_role("admin", "viewer")),
 ):
     get_month_by_id(month_id)
     return {"items": get_month_budget_rows(month_id)}
@@ -4283,7 +4503,7 @@ def upsert_month_budget(
 @APP.get("/api/analytics/year")
 def year_analytics(
     year: int = Query(...),
-    u: sqlite3.Row = Depends(require_role("admin", "accountant", "viewer")),
+    u: sqlite3.Row = Depends(require_role("admin", "viewer")),
 ):
     return compute_year_analytics(int(year))
 
@@ -4293,7 +4513,7 @@ def period_analytics(
     year: int = Query(...),
     month: Optional[int] = Query(None),
     quarter: Optional[int] = Query(None),
-    u: sqlite3.Row = Depends(require_role("admin", "accountant", "viewer")),
+    u: sqlite3.Row = Depends(require_role("admin", "viewer")),
 ):
     include_top = str(u["role"]) in ("admin", "accountant")
     return compute_period_analytics(type, int(year), month, quarter, include_top_categories=include_top)
@@ -4401,7 +4621,7 @@ def reopen_month(
 @APP.get("/api/months/{month_id}/services")
 def list_services(
     month_id: int,
-    u: sqlite3.Row = Depends(require_role("admin", "accountant", "viewer")),
+    u: sqlite3.Row = Depends(require_role("admin", "viewer")),
 ):
     recalc_services_for_month(month_id)
     rows = db_fetchall("SELECT * FROM services WHERE month_id=? ORDER BY service_date ASC;", (month_id,))
@@ -4413,7 +4633,7 @@ def create_service(
     month_id: int,
     body: ServiceIn,
     bg: BackgroundTasks,
-    u: sqlite3.Row = Depends(require_role("admin", "accountant")),
+    u: sqlite3.Row = Depends(require_role("admin")),
 ):
     ensure_month_open(month_id)
     m = get_month_by_id(month_id)
@@ -4515,7 +4735,7 @@ def create_service(
 def update_service(
     service_id: int,
     body: ServiceIn,
-    u: sqlite3.Row = Depends(require_role("admin", "accountant")),
+    u: sqlite3.Row = Depends(require_role("admin")),
 ):
     before = db_fetchone("SELECT * FROM services WHERE id=?;", (service_id,))
     if not before:
@@ -4563,7 +4783,7 @@ def update_service(
 @APP.delete("/api/services/{service_id}")
 def delete_service(
     service_id: int,
-    u: sqlite3.Row = Depends(require_role("admin", "accountant")),
+    u: sqlite3.Row = Depends(require_role("admin")),
 ):
     before = db_fetchone("SELECT * FROM services WHERE id=?;", (service_id,))
     if not before:
@@ -4585,7 +4805,7 @@ def delete_service(
 
 @APP.get("/api/categories")
 def list_categories(
-        u: sqlite3.Row = Depends(require_role("admin", "accountant", "viewer")),
+        u: sqlite3.Row = Depends(require_role("admin", "viewer")),
 ):
     return {"items": get_categories_payload()}
 
@@ -4593,7 +4813,7 @@ def list_categories(
 @APP.post("/api/categories")
 def create_category(
         body: CategoryCreateIn,
-        u: sqlite3.Row = Depends(require_role("admin", "accountant")),
+        u: sqlite3.Row = Depends(require_role("admin")),
 ):
     name = str(body.name or "").strip()
     if not name:
@@ -4781,7 +5001,7 @@ def rename_categories_mass(
 
 @APP.get("/api/tags")
 def list_tags(
-        u: sqlite3.Row = Depends(require_role("admin", "accountant", "viewer")),
+        u: sqlite3.Row = Depends(require_role("admin", "viewer")),
 ):
     return {"items": get_tags_payload()}
 
@@ -4789,7 +5009,7 @@ def list_tags(
 @APP.post("/api/tags")
 def create_tag(
         body: Dict[str, Any] = Body(...),
-        u: sqlite3.Row = Depends(require_role("admin", "accountant")),
+        u: sqlite3.Row = Depends(require_role("admin")),
 ):
     name = str(body.get("name") or "").strip()
     if not name:
@@ -4865,7 +5085,7 @@ def list_expenses(
         month_id: int,
         tags: Optional[str] = Query(default=None),
         mode: str = Query(default="any"),
-        u: sqlite3.Row = Depends(require_role("admin", "accountant", "viewer")),
+        u: sqlite3.Row = Depends(require_role("admin", "viewer")),
 ):
     ensure_tithe_expense(month_id, user_id=None)
     tag_filters: List[str] = []
@@ -4986,7 +5206,7 @@ def create_expense(
 def update_expense(
     expense_id: int,
     body: ExpenseIn,
-    u: sqlite3.Row = Depends(require_role("admin", "accountant")),
+    u: sqlite3.Row = Depends(require_role("admin")),
 ):
     before = db_fetchone("SELECT * FROM expenses WHERE id=?;", (expense_id,))
     if not before:
@@ -5038,7 +5258,7 @@ def update_expense(
 @APP.delete("/api/expenses/{expense_id}")
 def delete_expense(
     expense_id: int,
-    u: sqlite3.Row = Depends(require_role("admin", "accountant")),
+    u: sqlite3.Row = Depends(require_role("admin")),
 ):
     before = db_fetchone("SELECT * FROM expenses WHERE id=?;", (expense_id,))
     if not before:
@@ -5066,7 +5286,7 @@ def delete_expense(
 def create_expense_draft(
         month_id: int,
         body: Dict[str, Any] = Body(...),
-        u: sqlite3.Row = Depends(require_role("admin", "accountant")),
+        u: sqlite3.Row = Depends(require_role("admin")),
 ):
     ensure_month_open(month_id)
     tz = CFG.tzinfo()
@@ -5096,7 +5316,7 @@ def create_expense_draft(
 def update_draft(
         draft_id: int,
         body: Dict[str, Any] = Body(...),
-        u: sqlite3.Row = Depends(require_role("admin", "accountant")),
+        u: sqlite3.Row = Depends(require_role("admin")),
 ):
     existing = get_draft_or_404(draft_id)
     if existing["status"] != "draft":
@@ -5123,7 +5343,7 @@ def list_drafts(
         month_id: int,
         kind: str = Query("expense"),
         scope: str = Query("mine"),
-        u: sqlite3.Row = Depends(require_role("admin", "accountant", "viewer")),
+        u: sqlite3.Row = Depends(require_role("admin", "viewer")),
 ):
     if kind != "expense":
         raise HTTPException(status_code=400, detail="Unsupported draft kind")
@@ -5157,7 +5377,7 @@ def list_drafts(
 @APP.post("/api/drafts/{draft_id}/submit")
 def submit_draft(
         draft_id: int,
-        u: sqlite3.Row = Depends(require_role("admin", "accountant")),
+        u: sqlite3.Row = Depends(require_role("admin")),
 ):
     draft = get_draft_or_404(draft_id)
     if draft["status"] != "draft":
@@ -5216,7 +5436,7 @@ def submit_draft(
 @APP.delete("/api/drafts/{draft_id}")
 def delete_draft(
         draft_id: int,
-        u: sqlite3.Row = Depends(require_role("admin", "accountant")),
+        u: sqlite3.Row = Depends(require_role("admin")),
 ):
     draft = get_draft_or_404(draft_id)
     if draft["status"] != "draft":
@@ -5239,7 +5459,7 @@ def delete_draft(
 def upload_expense_attachment(
         expense_id: int,
         file: UploadFile = File(...),
-        u: sqlite3.Row = Depends(require_role("admin", "accountant")),
+        u: sqlite3.Row = Depends(require_role("admin")),
 ):
     expense = get_expense_or_404(expense_id)
     ensure_month_open(int(expense["month_id"]))
@@ -5340,7 +5560,7 @@ def upload_expense_attachment(
 @APP.get("/api/expenses/{expense_id}/attachments")
 def list_expense_attachments(
         expense_id: int,
-        u: sqlite3.Row = Depends(require_role("admin", "accountant", "viewer")),
+        u: sqlite3.Row = Depends(require_role("admin", "viewer")),
 ):
     get_expense_or_404(expense_id)
     rows = db_fetchall(
@@ -5359,7 +5579,7 @@ def list_expense_attachments(
 def get_attachment(
         attachment_id: int,
         inline: int = Query(1),
-        u: sqlite3.Row = Depends(require_role("admin", "accountant", "viewer")),
+        u: sqlite3.Row = Depends(require_role("admin", "viewer")),
 ):
     row = get_attachment_or_404(attachment_id)
     if row["entity_type"] != "expense":
@@ -5380,7 +5600,7 @@ def get_attachment(
 @APP.delete("/api/attachments/{attachment_id}")
 def delete_attachment(
         attachment_id: int,
-        u: sqlite3.Row = Depends(require_role("admin", "accountant")),
+        u: sqlite3.Row = Depends(require_role("admin")),
 ):
     row = get_attachment_or_404(attachment_id)
     if row["entity_type"] != "expense":
@@ -5404,7 +5624,7 @@ def delete_attachment(
 # ---------------------------
 
 @APP.get("/api/settings")
-def api_get_settings(u: sqlite3.Row = Depends(require_role("admin", "accountant", "viewer"))):
+def api_get_settings(u: sqlite3.Row = Depends(require_role("admin", "viewer"))):
     s = get_settings()
     out = dict(s)
     out["daily_expenses_enabled"] = bool(int(out.get("daily_expenses_enabled") or 0))
@@ -5478,7 +5698,7 @@ async def api_update_settings(
 
 @APP.get("/api/admin/monitor/overview")
 def api_monitor_overview(
-    u: sqlite3.Row = Depends(require_role("admin", "accountant")),
+    u: sqlite3.Row = Depends(require_role("admin")),
 ):
     tzinfo = CFG.tzinfo()
     since = (dt.datetime.now(tzinfo) - dt.timedelta(hours=24)).replace(microsecond=0).isoformat()
@@ -5541,7 +5761,7 @@ def api_monitor_jobs(
 def api_monitor_deliveries(
     limit: int = Query(50, ge=1, le=500),
     kind: Optional[str] = Query(None),
-    u: sqlite3.Row = Depends(require_role("admin", "accountant")),
+    u: sqlite3.Row = Depends(require_role("admin")),
 ):
     params: List[Any] = []
     where = ""
@@ -5561,7 +5781,7 @@ def api_monitor_deliveries(
 # ---------------------------
 
 @APP.post("/api/reports/sunday")
-async def api_report_sunday(u: sqlite3.Row = Depends(require_role("admin", "accountant"))):
+async def api_report_sunday(u: sqlite3.Row = Depends(require_role("admin"))):
     s = get_settings()
     recipients = list_report_recipients(s)
     if not recipients:
@@ -5576,7 +5796,7 @@ async def api_report_sunday(u: sqlite3.Row = Depends(require_role("admin", "acco
 
 
 @APP.post("/api/reports/month_expenses")
-async def api_report_month_expenses(u: sqlite3.Row = Depends(require_role("admin", "accountant"))):
+async def api_report_month_expenses(u: sqlite3.Row = Depends(require_role("admin"))):
     s = get_settings()
     recipients = list_report_recipients(s)
     if not recipients:
@@ -5589,7 +5809,7 @@ async def api_report_month_expenses(u: sqlite3.Row = Depends(require_role("admin
     return {"ok": True}
 
 @APP.post("/api/reports/test")
-async def api_report_test(u: sqlite3.Row = Depends(require_role("admin", "accountant"))):
+async def api_report_test(u: sqlite3.Row = Depends(require_role("admin"))):
     s = get_settings()
     recipients = list_report_recipients(s)
     if not recipients:
@@ -5731,7 +5951,7 @@ async def api_restore_backup(
 @APP.get("/api/export/csv")
 def export_csv(
     month_id: int = Query(...),
-    u: sqlite3.Row = Depends(require_role("admin", "accountant")),
+    u: sqlite3.Row = Depends(require_role("admin")),
 ):
     ensure_tithe_expense(month_id, user_id=int(u["id"]))
     m = get_month_by_id(month_id)
@@ -5788,7 +6008,7 @@ def export_csv(
 @APP.get("/api/export/excel")
 def export_excel(
     year: int = Query(...),
-    u: sqlite3.Row = Depends(require_role("admin", "accountant")),
+    u: sqlite3.Row = Depends(require_role("admin")),
 ):
     if openpyxl is None:
         raise HTTPException(status_code=500, detail="openpyxl is not installed")

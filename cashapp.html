@@ -533,8 +533,20 @@
     <div id="authCard" class="card cardPad hidden">
       <div class="label">Авторизация</div>
       <div class="muted small" id="authMessage">
-        Используйте ссылку входа, чтобы пройти авторизацию.
+        Введите логин и пароль для доступа к модулю наличных.
       </div>
+      <div class="sp12"></div>
+      <div class="field">
+        <div class="label">Логин</div>
+        <input id="authLogin" class="input" type="text" autocomplete="username" />
+      </div>
+      <div class="field">
+        <div class="label">Пароль</div>
+        <input id="authPassword" class="input" type="password" autocomplete="current-password" />
+      </div>
+      <div id="authError" class="muted small" style="color: var(--danger);"></div>
+      <div class="sp8"></div>
+      <button id="authSubmitBtn" class="btn btnPrimary" type="button">Войти</button>
     </div>
 
 
@@ -737,21 +749,6 @@
 
 
 
-    function consumeMagicTokenFromUrl(){
-      try{
-        const url = new URL(window.location.href);
-        const token = url.searchParams.get("token") || "";
-        if (token){
-          url.searchParams.delete("token");
-          history.replaceState({}, document.title, url.toString());
-        }
-        return token;
-      }catch{
-        return "";
-      }
-    }
-
-
 
     /**********************
      * API helper
@@ -774,20 +771,19 @@
       setToken(token){
         this.token = token || null;
         if (token){
-          localStorage.setItem("cashapp_token", token);
+          localStorage.setItem("sessionToken", token);
         }
       },
       clearToken(){
         this.token = null;
-        localStorage.removeItem("cashapp_token");
+        localStorage.removeItem("sessionToken");
       },
       async req(method, path, body){
         const headers = { "Content-Type": "application/json" };
-        let url = this.baseUrl + path;
+        const url = this.baseUrl + path;
         if (this.token){
           headers.Authorization = `Bearer ${this.token}`;
-          const sep = url.includes("?") ? "&" : "?";
-          url += `${sep}token=${encodeURIComponent(this.token)}`;
+
         }
         const res = await fetch(url, {
           method,
@@ -814,24 +810,8 @@
       },
       get(p){ return this.req("GET", p); },
       post(p,b){ return this.req("POST", p, b); },
-      async authMagic(loginToken){
-        const res = await fetch(`${this.baseUrl}/api/auth/magic/exchange`,{
-          method: "POST",
-          headers: { "Authorization": `Bearer ${loginToken}` },
-        });
-        const txt = await res.text();
-        let data = null;
-        try{ data = txt ? JSON.parse(txt) : null; } catch { data = txt; }
-        if (!res.ok){
-          if (res.status === 401){
-            throw new Error("Ссылка истекла или недействительна.");
-          }
-          if (res.status === 403){
-            throw new Error("Недостаточно прав для доступа.");
-          }
-          const msg = (data && data.detail) ? data.detail : (typeof data === "string" ? data : "Ошибка авторизации");
-          throw new Error(msg);
-        }
+      async authLogin(payload){
+        const data = await this.post("/api/auth/login", payload);
         if (data?.token) this.setToken(data.token);
         if (data?.user) applyUser(data.user);
         return data;
@@ -1313,13 +1293,16 @@
 
     async function loadMe(){
       const me = await API.get("/api/me");
+      if (me?.role && !["admin", "cash_signer"].includes(String(me.role))){
+        throw new Error("Нет доступа к модулю наличных");
+      }
       applyUser(me);
       setStatus("Готово", "success");
       return me;
     }
 
     function loadStoredToken(){
-      const storedToken = localStorage.getItem("cashapp_token");
+      const storedToken = localStorage.getItem("sessionToken");
       if (storedToken){
         API.token = storedToken;
       }
@@ -1335,15 +1318,38 @@
       card.classList.toggle("hidden", !show);
     }
 
+    function setAuthError(message){
+      const el = $("authError");
+      if (!el) return;
+      el.textContent = message || "";
+    }
+
+    async function submitAuth(){
+      const login = ($("authLogin").value || "").trim();
+      const password = ($("authPassword").value || "").trim();
+      setAuthError("");
+      if (!login || !password){
+        setAuthError("Введите логин и пароль.");
+        return false;
+      }
+      try{
+        await API.authLogin({ login, password });
+        await loadMe();
+        toggleAuthCard(false);
+        return true;
+      }catch(err){
+        setAuthError(err?.message || "Ошибка авторизации");
+        API.clearToken();
+        return false;
+      }
+    }
+
+
     async function ensureAuth(){
       try{
         setStatus("Авторизация…");
-        const magicToken = consumeMagicTokenFromUrl();
-        if (magicToken){
-          await API.authMagic(magicToken);
-        }
         if (!API.token){
-          toggleAuthCard(true, "Используйте ссылку входа для авторизации.");
+          toggleAuthCard(true, "Введите логин и пароль для доступа.");
           setStatus("Нет данных авторизации", "error");
           return false;
         }
@@ -1371,6 +1377,12 @@
     $("sigClear").addEventListener("click", ()=> Pad.clear());
     $("sigSend").addEventListener("click", ()=> signCurrent().catch(e=> toast(String(e.message||e))));
     $("refuseBtn").addEventListener("click", ()=> refuseCurrent().catch(e=> toast(String(e.message||e))));
+    $("authSubmitBtn").addEventListener("click", async ()=>{
+      const ok = await submitAuth();
+      if (ok){
+        await loadList();
+      }
+    });
 
     $("refreshBtn").addEventListener("click", ()=>{
       ensureAuth()

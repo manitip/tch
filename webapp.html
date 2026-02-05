@@ -1836,6 +1836,28 @@
       line-height: 1.4;
       margin: 0 0 16px;
     }
+    .authGateForm{
+      display: grid;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .authGateField{
+      display: grid;
+      gap: 6px;
+    }
+    .authGateLabel{
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .authGateInput{
+      height: 44px;
+      border-radius: 12px;
+      border: 1px solid var(--stroke);
+      background: var(--card);
+      padding: 0 12px;
+      font-size: 14px;
+      color: var(--text);
+    }
     .authGateError{
       color: var(--danger);
     }
@@ -1863,6 +1885,8 @@
     .authGateSwitch{
       display: flex;
       justify-content: center;
+      align-items: center;
+      gap: 6px;
       margin-top: 10px;
     }
     .authGateLink{
@@ -2089,8 +2113,40 @@
     <div class="authGateCard">
       <div id="authGateTitle" class="authGateTitle">Требуется авторизация</div>
       <p id="authGateMessage" class="authGateMessage">
-        Используйте ссылку входа для доступа к приложению.
+        Войдите в систему или зарегистрируйтесь.
       </p>
+      <div class="authGateForm">
+        <div class="authGateField" data-auth-mode="login register bootstrap">
+          <label class="authGateLabel" for="authLogin">Логин</label>
+          <input id="authLogin" class="authGateInput" type="text" autocomplete="username" />
+        </div>
+        <div class="authGateField" data-auth-mode="login register bootstrap">
+          <label class="authGateLabel" for="authPassword">Пароль</label>
+          <input id="authPassword" class="authGateInput" type="password" autocomplete="current-password" />
+        </div>
+        <div class="authGateField" data-auth-mode="register bootstrap">
+          <label class="authGateLabel" for="authName">Имя (опционально)</label>
+          <input id="authName" class="authGateInput" type="text" autocomplete="name" />
+        </div>
+        <div class="authGateField" data-auth-mode="bootstrap">
+          <label class="authGateLabel" for="authSecret">Секрет администратора</label>
+          <input id="authSecret" class="authGateInput" type="password" autocomplete="off" />
+        </div>
+      </div>
+      <div id="authGateError" class="authGateError hidden"></div>
+      <div class="authGateActions">
+        <button id="authSubmitBtn" class="authGateBtn primary" type="button">Войти</button>
+      </div>
+      <div id="authSwitchWrap" class="authGateSwitch">
+        <span id="authSwitchText" class="authGateMessage" style="margin:0;"></span>
+        <button id="authSwitchBtn" class="authGateLink" type="button"></button>
+      </div>
+      <div id="authBootstrapWrap" class="authGateSwitch hidden">
+        <button id="authBootstrapBtn" class="authGateLink" type="button">Создать администратора</button>
+      </div>
+      <div id="authBackWrap" class="authGateSwitch hidden">
+        <button id="authBackBtn" class="authGateLink" type="button">Назад ко входу</button>
+      </div>
     </div>
   </div>
 
@@ -3202,7 +3258,7 @@
                   <div class="sectionHeader"><h3>Пользователи</h3></div>
                   <div class="card bigCard">
                     <div class="tiny muted2">
-                      Управление доступом выполняется через базу данных (по Telegram ID).
+                      Управление доступом выполняется через базу данных (логины и роли).
                       Для изменений обратитесь к администратору.
                     </div>
                     <div class="spacer12"></div>
@@ -3609,21 +3665,6 @@
      **********************/
 
 
-    function consumeMagicTokenFromUrl(){
-      try{
-        const url = new URL(window.location.href);
-        const token = url.searchParams.get("token") || "";
-        if (token){
-          url.searchParams.delete("token");
-          history.replaceState({}, document.title, url.toString());
-        }
-        return token;
-      }catch{
-        return "";
-      }
-    }
-
-
       const DEBUG_AUTH = true;
 
       const maskTok = (t)=>{
@@ -3700,32 +3741,43 @@
       })(), // same host unless overridden
 
 
-      async authMagic(loginToken){
-        dlog("authMagic:send", { loginToken: maskTok(loginToken), baseUrl: API.baseUrl });
-        diag("authMagic:enter", { hasLoginToken: !!loginToken });
-
-        const res = await fetch(`${API.baseUrl}/api/auth/magic/exchange`,{
-          method:"POST",
-          headers: {"Authorization": `Bearer ${loginToken}`}
-        });
-
-        diag("authMagic:response", { status: res.status });
-
-        if (!res.ok) {
-          const t = await res.text().catch(()=> "");
-          diag("authMagic:fail", { status: res.status, body: (t || "").slice(0, 200) });
-          throw new Error(`${res.status}: ${t || "Unauthorized"}`);
+      setSession(data){
+        API.token = data?.token || null;
+        API.user = data?.user || null;
+        if (API.token){
+          localStorage.setItem("sessionToken", API.token);
+        } else {
+          localStorage.removeItem("sessionToken");
         }
-
-        const data = await res.json();
-
-        diag("authMagic:ok", { hasSessionToken: !!data.token, role: data.user?.role || null });
-        dlog("authMagic:ok", { sessionToken: maskTok(data.token), user: data.user ? {id:data.user.id, role:data.user.role} : null });
-
-        API.token = data.token;
-        API.user = data.user;
-        localStorage.setItem("sessionToken", API.token);
-        localStorage.setItem("sessionUser", JSON.stringify(API.user));
+        if (API.user){
+          localStorage.setItem("sessionUser", JSON.stringify(API.user));
+        } else {
+          localStorage.removeItem("sessionUser");
+        }
+      },
+      clearSession(){
+        API.token = null;
+        API.user = null;
+        localStorage.removeItem("sessionToken");
+        localStorage.removeItem("sessionUser");
+      },
+      async authLogin(payload){
+        const data = await API.post("/api/auth/login", payload);
+        API.setSession(data);
+        return data;
+      },
+      async authRegister(payload){
+        const data = await API.post("/api/auth/register", payload);
+        API.setSession(data);
+        return data;
+      },
+      async authBootstrap(payload, secret){
+        const data = await API.req("/api/auth/bootstrap/create-admin", {
+          method: "POST",
+          body: JSON.stringify(payload),
+          headers: { "X-Admin-Bootstrap-Secret": secret },
+        });
+        API.setSession(data);
         return data;
       },
 
@@ -3817,7 +3869,7 @@
       },
 
 
-      function loadStoredSession(){
+      loadStoredSession(){
         const storedToken = localStorage.getItem("sessionToken");
         if (storedToken) API.token = storedToken;
 
@@ -3832,7 +3884,8 @@
 
         dlog("loadStoredSession", { token: maskTok(API.token), hasUser: !!API.user });
         diag("loadStoredSession", { hasToken: !!API.token, hasUser: !!API.user });
-      }
+      },
+    };
 
 
 
@@ -3857,7 +3910,68 @@
 
     const AuthGateState = {
       mode: "login",
+      bootstrapAvailable: false,
     };
+
+    function setAuthError(message){
+      const errEl = $("#authGateError");
+      if (!errEl) return;
+      if (message){
+        errEl.textContent = message;
+        errEl.classList.remove("hidden");
+      } else {
+        errEl.textContent = "";
+        errEl.classList.add("hidden");
+      }
+    }
+
+    function updateAuthGate(){
+      const gate = $("#authGate");
+      if (!gate) return;
+      gate.dataset.mode = AuthGateState.mode;
+      gate.querySelectorAll("[data-auth-mode]").forEach((el)=>{
+        const modes = (el.dataset.authMode || "").split(" ").filter(Boolean);
+        const show = modes.includes(AuthGateState.mode);
+        el.classList.toggle("hidden", !show);
+      });
+
+      const submitBtn = $("#authSubmitBtn");
+      if (submitBtn){
+        submitBtn.textContent = AuthGateState.mode === "register"
+          ? "Зарегистрироваться"
+          : (AuthGateState.mode === "bootstrap" ? "Создать администратора" : "Войти");
+      }
+
+      const switchWrap = $("#authSwitchWrap");
+      const switchText = $("#authSwitchText");
+      const switchBtn = $("#authSwitchBtn");
+      if (switchWrap && switchText && switchBtn){
+        if (AuthGateState.mode === "bootstrap"){
+          switchWrap.classList.add("hidden");
+        } else {
+          switchWrap.classList.remove("hidden");
+          if (AuthGateState.mode === "login"){
+            switchText.textContent = "Нет аккаунта?";
+            switchBtn.textContent = "Регистрация";
+            switchBtn.dataset.next = "register";
+          } else {
+            switchText.textContent = "Уже есть аккаунт?";
+            switchBtn.textContent = "Войти";
+            switchBtn.dataset.next = "login";
+          }
+        }
+      }
+
+      const bootstrapWrap = $("#authBootstrapWrap");
+      if (bootstrapWrap){
+        const showBootstrap = AuthGateState.bootstrapAvailable && AuthGateState.mode !== "bootstrap";
+        bootstrapWrap.classList.toggle("hidden", !showBootstrap);
+      }
+      const backWrap = $("#authBackWrap");
+      if (backWrap){
+        backWrap.classList.toggle("hidden", AuthGateState.mode !== "bootstrap");
+      }
+    }
 
     function showAuthGate(message, title){
       const gate = $("#authGate");
@@ -3867,7 +3981,7 @@
       const msgEl = $("#authGateMessage");
       if (msgEl && message) msgEl.textContent = message;
       gate.classList.remove("hidden");
-
+      updateAuthGate();
     }
 
     function hideAuthGate(){
@@ -3876,6 +3990,58 @@
       gate.classList.add("hidden");
 
     }
+    function setAuthMode(mode){
+      AuthGateState.mode = mode;
+      setAuthError("");
+      updateAuthGate();
+    }
+
+    async function loadBootstrapStatus(){
+      try{
+        const status = await API.get("/api/auth/bootstrap/status");
+        AuthGateState.bootstrapAvailable = !status?.admin_exists;
+        if (AuthGateState.bootstrapAvailable){
+          setAuthMode("bootstrap");
+        } else {
+          setAuthMode("login");
+        }
+      }catch{
+        AuthGateState.bootstrapAvailable = false;
+        setAuthMode("login");
+      }
+    }
+
+    async function submitAuth(){
+      const login = ($("#authLogin")?.value || "").trim();
+      const password = ($("#authPassword")?.value || "").trim();
+      const name = ($("#authName")?.value || "").trim();
+      const secret = ($("#authSecret")?.value || "").trim();
+
+      setAuthError("");
+      if (!login || !password){
+        setAuthError("Заполните логин и пароль.");
+        return;
+      }
+
+      try{
+        if (AuthGateState.mode === "register"){
+          await API.authRegister({ login, password, name: name || undefined });
+        } else if (AuthGateState.mode === "bootstrap"){
+          if (!secret){
+            setAuthError("Введите секрет администратора.");
+            return;
+          }
+          await API.authBootstrap({ login, password, name: name || undefined }, secret);
+        } else {
+          await API.authLogin({ login, password });
+        }
+        const me = await API.ensureAuth();
+        hideAuthGate();
+        await handleAuthenticated(me);
+      }catch(err){
+        const parsed = parseApiError(err);
+        setAuthError(parsed.detail || "Ошибка авторизации");
+      }
 
 
     /**********************
@@ -4041,7 +4207,7 @@
       }
     }
     function canEditAttachments(){
-      const canRole = (State.role === "admin" || State.role === "accountant");
+      const canRole = (State.role === "admin");
       return canRole && !isMonthClosed();
     }
     function setExpenseAttachments(expenseId, items){
@@ -4307,7 +4473,7 @@
      * Drafts
      **********************/
     function canSeeDrafts(){
-      return State.role === "admin" || State.role === "accountant";
+      return State.role === "admin";
     }
     async function loadDrafts(){
       if (!State.monthId || !canSeeDrafts()){
@@ -5004,7 +5170,7 @@
       formatDeltaBadge($("#periodExpensesDelta"), p.delta?.expenses_pct, false);
       formatDeltaBadge($("#periodNetDelta"), p.delta?.net_pct, true);
 
-      const canSeeTop = State.role === "admin" || State.role === "accountant";
+      const canSeeTop = State.role === "admin";
       const topCard = $("#periodTopExpensesCard");
       if (topCard) topCard.classList.toggle("hidden", !canSeeTop);
       if (canSeeTop) {
@@ -5098,7 +5264,7 @@
       formatDeltaBadge($("#periodIncomeDelta"), null, true);
       formatDeltaBadge($("#periodExpensesDelta"), null, false);
       formatDeltaBadge($("#periodNetDelta"), null, true);
-      const canSeeTop = State.role === "admin" || State.role === "accountant";
+     const canSeeTop = State.role === "admin";
       const topCard = $("#periodTopExpensesCard");
       if (topCard) topCard.classList.toggle("hidden", !canSeeTop);
       const topWrap = $("#periodTopExpenses");
@@ -5272,13 +5438,13 @@
     }
 
     function updateAddButtonsByRole(){
-      const canEdit = (State.role === "admin" || State.role === "accountant") && !isMonthClosed();
+      const canEdit = (State.role === "admin") && !isMonthClosed();
       $("#addSundayBtn").disabled = !canEdit;
       $("#addSundayBtn").style.opacity = canEdit ? "1" : ".55";
     }
 
     function applyRoleUI(){
-      const canEdit = (State.role === "admin" || State.role === "accountant");
+      const canEdit = (State.role === "admin");
       const isViewer = State.role === "viewer";
       const addBtn = $(".navBtn[data-screen='add']");
       if (addBtn) addBtn.style.display = canEdit ? "" : "none";
@@ -5576,7 +5742,7 @@
       }
       $("#histEmpty").classList.add("hidden");
 
-      const canEdit = (State.role === "admin" || State.role === "accountant");
+      const canEdit = (State.role === "admin");
       for(const it of items){
         const node = (State.historyMode === "don")
           ? makeDonationItem(it)
@@ -6272,7 +6438,7 @@
       const body = $("#editBody");
       body.innerHTML = "";
 
-      const canEdit = (State.role === "admin" || State.role === "accountant");
+      const canEdit = (State.role === "admin");
       const isSystem = (type==="expense" && Number(item.is_system||0) === 1);
       const isClosed = isMonthClosed();
 
@@ -6451,7 +6617,7 @@
 
     async function saveEdit(){
       if (!Edit.type || !Edit.item) return;
-      const canEdit = (State.role === "admin" || State.role === "accountant");
+      const canEdit = (State.role === "admin");
       if (!canEdit) return;
       if (isMonthClosed()){
         notifyMonthClosed($("#editModal .modal"));
@@ -6500,7 +6666,7 @@
 
     async function deleteEdit(){
       if (!Edit.type || !Edit.item) return;
-      const canEdit = (State.role === "admin" || State.role === "accountant");
+      const canEdit = (State.role === "admin");
       if (!canEdit) return;
       if (isMonthClosed()){
         notifyMonthClosed($("#editModal .modal"));
@@ -6524,7 +6690,7 @@
 
     async function duplicateEdit(){
       if (!Edit.type || !Edit.item) return;
-      const canEdit = (State.role === "admin" || State.role === "accountant");
+      const canEdit = (State.role === "admin");
       if (!canEdit) return;
       if (isMonthClosed()){
         notifyMonthClosed($("#editModal .modal"));
@@ -6770,7 +6936,7 @@
     function renderBudgetSettings(){
       const section = $("#budgetSection");
       if (!section) return;
-      const canEdit = (State.role === "admin" || State.role === "accountant");
+      const canEdit = (State.role === "admin");
       const isActivePage = State.settingsPage === "budgetSection";
       section.classList.toggle("hidden", !canEdit || !isActivePage);
       if (!canEdit || !isActivePage) return;
@@ -7051,7 +7217,7 @@
     }
 
     async function loadMonitorOverview(){
-      if (!(State.role === "admin" || State.role === "accountant")) return;
+      if (!(State.role === "admin")) return;
       const card = $("#monitorOverviewCard");
       if (card) card.classList.add("shimmer");
       try{
@@ -7178,7 +7344,7 @@
     }
 
     /**********************
-     * Cashflow (admin/accountant)
+     *     * Cashflow (admin)
      **********************/
     const CashflowState = {
       currentId: null,
@@ -7565,7 +7731,7 @@
 
 
     async function loadMonitorList(type){
-      if (!(State.role === "admin" || State.role === "accountant")) return;
+      if (!(State.role === "admin")) return;
       try{
         if (type === "errors"){
           const res = await API.get("/api/admin/monitor/logs?level=ERROR&limit=100");
@@ -7658,7 +7824,7 @@
         title: "Закрытие месяца",
         subtitle: "Статус и доступы",
         icon: "lock",
-        rolesVisible: ["admin", "accountant", "viewer"],
+        rolesVisible: ["admin", "viewer"],
         rolesEditable: ["admin"],
       },
       {
@@ -7666,24 +7832,25 @@
         title: "Шаблоны",
         subtitle: "Локальные пресеты расходов",
         icon: "description",
-        rolesVisible: ["admin", "accountant"],
         rolesEditable: ["admin", "accountant"],
+        rolesVisible: ["admin"],
+        rolesEditable: ["admin"],
       },
       {
         id: "cashflowSection",
         title: "Наличные / Подписи",
         subtitle: "Запросы и акты изъятия",
         icon: "payments",
-        rolesVisible: ["admin", "accountant"],
-        rolesEditable: ["admin", "accountant"],
+        rolesVisible: ["admin"],
+        rolesEditable: ["admin"],
       },
       {
         id: "exportSection",
         title: "Экспорт",
         subtitle: "CSV и Excel",
         icon: "download",
-        rolesVisible: ["admin", "accountant"],
-        rolesEditable: ["admin", "accountant"],
+        rolesVisible: ["admin"],
+        rolesEditable: ["admin"],
       },
       {
         id: "usersSection",
@@ -7714,8 +7881,8 @@
         title: "Бюджет",
         subtitle: "Лимиты по категориям",
         icon: "account_balance_wallet",
-        rolesVisible: ["admin", "accountant"],
-        rolesEditable: ["admin", "accountant"],
+        rolesVisible: ["admin"],
+        rolesEditable: ["admin"],
       },
       {
         id: "backupsSection",
@@ -7730,8 +7897,8 @@
         title: "Мониторинг",
         subtitle: "Ошибки и доставка",
         icon: "monitoring",
-        rolesVisible: ["admin", "accountant"],
-        rolesEditable: ["admin", "accountant"],
+        rolesVisible: ["admin"],
+        rolesEditable: ["admin"],
       },
     ];
     const SettingsMenuMap = new Map(SettingsMenuConfig.map((item)=>[item.id, item]));
@@ -7824,15 +7991,15 @@
     }
 
     async function renderSettingsUI(){
-      const canSee = (State.role === "admin" || State.role === "accountant" || State.role === "viewer");
+      const canSee = (State.role === "admin" || State.role === "viewer");
       $("#settingsDenied").classList.toggle("hidden", canSee);
       $("#settingsWrap").classList.toggle("hidden", !canSee);
       if (!canSee) return;
 
-      // accountant: show only local templates section (MVP) + exports
+
       const isAdmin = State.role === "admin";
       const isViewer = State.role === "viewer";
-      const isAccountant = State.role === "accountant";
+
       const visibleIds = renderSettingsMenu();
       if (State.settingsPage && !visibleIds.includes(State.settingsPage)){
         closeSettingsPage({immediate:true});
@@ -7964,7 +8131,7 @@
         alert("Месяц не создан. Попросите админа создать месяц.");
         return;
       }
-      if (!(State.role === "admin" || State.role === "accountant")) {
+      if (!(State.role === "admin")) {
         alert("У вашей роли нет прав на изменение данных.");
         return;
       }
@@ -8020,7 +8187,7 @@
         alert("Месяц не создан. Попросите админа создать месяц.");
         return;
       }
-      if (!(State.role === "admin" || State.role === "accountant")) {
+      if (!(State.role === "admin")) {
         alert("У вашей роли нет прав на изменение данных.");
         return;
       }
@@ -8087,17 +8254,23 @@
      **********************/
     function openDownload(url){
       const token = API.token || localStorage.getItem("sessionToken");
-      const finalUrl = token ? (()=> {
-        const u = new URL(url, location.origin);
-        if (!u.searchParams.has("token")) u.searchParams.set("token", token);
-        return u.toString();
-      })() : url;
-      const tgApp = getTelegramWebApp();
-      if (tgApp?.openLink){
-        tgApp.openLink(finalUrl);
-      } else {
-        window.open(finalUrl, "_blank");
-      }
+      const headers = token ? { "Authorization": `Bearer ${token}` } : {};
+      fetch(url, { headers })
+        .then((res)=>{
+          if (!res.ok) throw new Error("download_failed");
+          return res.blob();
+        })
+        .then((blob)=>{
+          const blobUrl = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = blobUrl;
+          a.download = "";
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(()=> URL.revokeObjectURL(blobUrl), 2000);
+        })
+        .catch(()=> alert("Не удалось скачать файл."));
     }
 
     /**********************
@@ -8257,13 +8430,19 @@
      * Event wiring
      **********************/
     function wireEvents(){
-
+      $("#authSubmitBtn").addEventListener("click", ()=> submitAuth().catch(()=> {}));
+      $("#authSwitchBtn").addEventListener("click", (e)=>{
+        const next = e.currentTarget?.dataset?.next || "login";
+        setAuthMode(next);
+      });
+      $("#authBootstrapBtn").addEventListener("click", ()=> setAuthMode("bootstrap"));
+      $("#authBackBtn").addEventListener("click", ()=> setAuthMode("login"));
 
       // nav
       $$(".navBtn").forEach(btn=>{
         btn.addEventListener("click", ()=>{
           const screen = btn.dataset.screen;
-          if (screen === "add" && !(State.role === "admin" || State.role === "accountant")){
+          if (screen === "add" && !(State.role === "admin")){
             switchScreen("dashboard");
             setToast("Нет доступа");
             return;
@@ -8399,7 +8578,7 @@
       $("#expTagsAddBtn").addEventListener("click", ()=>{
         openTagPicker({
           selected: State.expenseTags,
-          allowCreate: (State.role === "admin" || State.role === "accountant"),
+          allowCreate: (State.role === "admin"),
           title: "Теги для расхода",
           onApply: (tags)=> setExpenseTags(tags)
         });
@@ -8435,7 +8614,7 @@
       $("#histTagsAddBtn").addEventListener("click", ()=>{
         openTagPicker({
           selected: State.historyTags,
-          allowCreate: (State.role === "admin" || State.role === "accountant"),
+          allowCreate: (State.role === "admin"),
           title: "Фильтр по тегам",
           onApply: (tags)=>{
             setHistoryTags(tags);
@@ -8560,7 +8739,7 @@
         }
       });
       $("#addCategoryBtn").addEventListener("click", ()=>{
-        if (!(State.role === "admin" || State.role === "accountant")){
+        if (!(State.role === "admin")){
           setToast("Нет доступа");
           return;
         }
@@ -8737,82 +8916,8 @@
     /**********************
      * Boot
      **********************/
-    async function boot(){
-      applyTheme("auto");
-      loadStoredSession();
-      // load templates early
-      loadTemplates();
-      rebuildTemplateSelect();
-      showAuthGate("Проверяем доступ...", "Авторизация");
-
-      // init dates
-      const t = todayYMD();
-      State.year = t.y;
-      State.month = t.m;
-      setMonthTitle();
-      State.periodType = "month";
-      State.periodYear = State.year;
-      State.periodMonth = State.month;
-      State.periodQuarter = quarterFromMonth(State.month);
-      State.otherIncomeDate = `${t.y}-${String(t.m).padStart(2,"0")}-${String(t.d).padStart(2,"0")}`;
-
-      wireEvents();
-      initDropdownFromSelect("donIncomeType", "donIncomeTypeDropdown");
-      initDropdownFromSelect("donAccount", "donAccountDropdown");
-      initDropdownFromSelect("expAccount", "expAccountDropdown");
-      initDropdownFromSelect("expCategory", "expCategoryDropdown");
-      initDropdownFromSelect("expTemplate", "expTemplateDropdown");
-      initDropdownFromSelect("histMonthSelect", "histMonthDropdown");
-      initDropdownFromSelect("histCategorySelect", "histCategoryDropdown");
-      initDropdownFromSelect("periodYearSelect", "periodYearDropdown");
-      initDropdownFromSelect("periodMonthSelect", "periodMonthDropdown");
-      initDropdownFromSelect("cashflowCreateAccount", "cashflowCreateAccountDropdown");
-      initDropdownFromSelect("cashflowFilterAccount", "cashflowFilterAccountDropdown");
-      initDropdownFromSelect("cashflowFilterStatus", "cashflowFilterStatusDropdown");
-      initDropdownFromSelect("cashflowActAccount", "cashflowActAccountDropdown");
-      setDonationTypeUI();
-
-
-      // Hide settings tab label for viewer (still present but gated)
-      // We'll keep it visible but will block opening.
-
-
-      try{
-        const magicToken = consumeMagicTokenFromUrl();
-        if (magicToken){
-          showAuthGate("Входим по ссылке...", "Авторизация");
-          await API.authMagic(magicToken);
-        }
-
-        const initData = getTelegramInitData();
-        if (!initData && !API.token){
-          throw new Error("Telegram initData is missing");
-        }
-        if (initData && !API.token){
-          await API.authTelegram(initData);
-        }
-
-        await API.ensureAuth();
-        hideAuthGate();
-      }catch(e){
-        const parsed = parseApiError(e);
-        const raw = parsed.detail || String(e?.message || "Авторизация не удалась.");
-        if (parsed.status === 401){
-          showAuthGate("Ссылка истекла или недействительна.", "Авторизация");
-        } else if (parsed.status === 403){
-          showAuthGate("Недостаточно прав для доступа.", "Авторизация");
-        } else if (/initData/i.test(raw)){
-          showAuthGate(
-            "Откройте приложение через Telegram или используйте ссылку входа из бота.",
-            "Требуется авторизация"
-          );
-        } else {
-          showAuthGate(raw, "Нет доступа");
-        }
-        return;
-      }
-
-      const rawRole = API.user?.role || "viewer";
+    async function handleAuthenticated(me){
+      const rawRole = me?.role || "viewer";
       State.role = rawRole === "owner" ? "admin" : rawRole;
       if (State.role === "cash_signer"){
         window.location.replace(`${API.baseUrl}/cashapp`);
@@ -8849,7 +8954,7 @@
 
       const initialScreen = new URLSearchParams(window.location.search).get("screen");
       if (["dashboard","add","history","settings"].includes(initialScreen)){
-        if (initialScreen === "add" && !(State.role === "admin" || State.role === "accountant")) {
+        if (initialScreen === "add" && State.role !== "admin") {
           setToast("Нет доступа");
         } else {
           switchScreen(initialScreen);
@@ -8857,6 +8962,62 @@
         }
       }
     }
+
+    async function boot(){
+      applyTheme("auto");
+      API.loadStoredSession();
+      // load templates early
+      loadTemplates();
+      rebuildTemplateSelect();
+      showAuthGate("Проверяем доступ...", "Авторизация");
+
+      // init dates
+      const t = todayYMD();
+      State.year = t.y;
+      State.month = t.m;
+      setMonthTitle();
+      State.periodType = "month";
+      State.periodYear = State.year;
+      State.periodMonth = State.month;
+      State.periodQuarter = quarterFromMonth(State.month);
+      State.otherIncomeDate = `${t.y}-${String(t.m).padStart(2,"0")}-${String(t.d).padStart(2,"0")}`;
+
+      wireEvents();
+      initDropdownFromSelect("donIncomeType", "donIncomeTypeDropdown");
+      initDropdownFromSelect("donAccount", "donAccountDropdown");
+      initDropdownFromSelect("expAccount", "expAccountDropdown");
+      initDropdownFromSelect("expCategory", "expCategoryDropdown");
+      initDropdownFromSelect("expTemplate", "expTemplateDropdown");
+      initDropdownFromSelect("histMonthSelect", "histMonthDropdown");
+      initDropdownFromSelect("histCategorySelect", "histCategoryDropdown");
+      initDropdownFromSelect("periodYearSelect", "periodYearDropdown");
+      initDropdownFromSelect("periodMonthSelect", "periodMonthDropdown");
+      initDropdownFromSelect("cashflowCreateAccount", "cashflowCreateAccountDropdown");
+      initDropdownFromSelect("cashflowFilterAccount", "cashflowFilterAccountDropdown");
+      initDropdownFromSelect("cashflowFilterStatus", "cashflowFilterStatusDropdown");
+      initDropdownFromSelect("cashflowActAccount", "cashflowActAccountDropdown");
+      setDonationTypeUI();
+
+
+      // Hide settings tab label for viewer (still present but gated)
+      // We'll keep it visible but will block opening.
+
+      await loadBootstrapStatus();
+
+      if (API.token){
+        try{
+          const me = await API.ensureAuth();
+          hideAuthGate();
+          await handleAuthenticated(me);
+          return;
+        }catch{
+          API.clearSession();
+        }
+      }
+
+      showAuthGate("Введите логин и пароль.", "Авторизация");
+    }
+
 
     boot().catch(e=> alert(String(e.message||e)));
   </script>

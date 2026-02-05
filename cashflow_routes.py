@@ -143,7 +143,7 @@ def cashapp_html():
 def create_request(
     body: CashRequestCreateIn,
     bg: BackgroundTasks,
-    u=Depends(_app_require_role("admin", "accountant")),
+        u=Depends(_app_require_role("admin")),
 ):
     _ensure_cashflow_tables()
     cfg = _cash_cfg()
@@ -184,7 +184,7 @@ def my_requests(
     only_open: bool = Query(False),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
-    u=Depends(_app_require_role("admin", "accountant", "viewer", "cash_signer")),
+    u=Depends(_app_require_role("admin", "cash_signer")),
 ):
     _ensure_cashflow_tables()
     db_connect = _app_db_connect()
@@ -218,7 +218,7 @@ def list_requests(
 @router.get("/api/cashflow/requests/{request_id}")
 def request_detail(
     request_id: int,
-    u=Depends(_app_require_role("admin", "accountant", "viewer", "cash_signer")),
+    u=Depends(_app_require_role("admin", "cash_signer")),
 ):
     _ensure_cashflow_tables()
     db_connect = _app_db_connect()
@@ -422,7 +422,7 @@ def admin_cancel(
 def get_signature_png(
     request_id: int,
     telegram_id: int,
-    u=Depends(_app_require_role("admin", "accountant", "viewer", "cash_signer")),
+    u=Depends(_app_require_role("admin", "cash_signer")),
 ):
     """Возвращает эффективную подпись участника: attempt=2 если есть, иначе attempt=1."""
     _ensure_cashflow_tables()
@@ -478,7 +478,7 @@ def get_signature_png(
 
 
 def _user_can_view_withdraw_act(telegram_id: int, role: str) -> bool:
-    if role in ("owner", "admin", "accountant"):
+    if role in ("owner", "admin"):
         return True
     db_connect = _app_db_connect()
     with db_connect() as conn:
@@ -508,7 +508,7 @@ def withdraw_act(
     account: Optional[str] = Query(None, description="main|praise|alpha (опционально)"),
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
-    u=Depends(_app_require_role("admin", "accountant", "cash_signer")),
+    u=Depends(_app_require_role("admin", "cash_signer")),
 ):
     if not _user_can_view_withdraw_act(int(u["telegram_id"]), str(u["role"])):
         raise HTTPException(status_code=403, detail="No access to withdraw act")
@@ -523,7 +523,7 @@ def withdraw_act_xlsx(
     account: Optional[str] = Query(None, description="main|praise|alpha (опционально)"),
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
-    u=Depends(_app_require_role("admin", "accountant")),
+    u=Depends(_app_require_role("admin")),
 ):
     """Экспорт акта наличных (сбор/изъятие) в Excel с PNG подписями."""
     _ensure_cashflow_tables()
