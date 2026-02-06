@@ -2164,25 +2164,17 @@
         Войдите в систему или зарегистрируйтесь.
       </p>
       <div class="authGateForm">
-        <div class="authGateField" data-auth-mode="login register bootstrap">
+        <div class="authGateField" data-auth-mode="login register">
           <label class="authGateLabel" for="authLogin">Логин</label>
           <input id="authLogin" class="authGateInput" type="text" autocomplete="username" placeholder="например, ivan.petrov" />
         </div>
-        <div class="authGateField" data-auth-mode="login register bootstrap">
+        <div class="authGateField" data-auth-mode="login register">
           <label class="authGateLabel" for="authPassword">Пароль</label>
           <input id="authPassword" class="authGateInput" type="password" autocomplete="current-password" placeholder="минимум 6 символов" />
         </div>
-        <div class="authGateField" data-auth-mode="register bootstrap">
+        <div class="authGateField" data-auth-mode="register">
           <label class="authGateLabel" for="authName">Имя (опционально)</label>
           <input id="authName" class="authGateInput" type="text" autocomplete="name" placeholder="как к вам обращаться" />
-        </div>
-        <div class="authGateField" data-auth-mode="bootstrap">
-          <label class="authGateLabel" for="authSecret">Секрет администратора</label>
-          <input id="authSecret" class="authGateInput" type="password" autocomplete="off" />
-        </div>
-        <div class="authGateHint" data-auth-mode="bootstrap">
-          Секрет задаётся на сервере через переменную <strong>ADMIN_BOOTSTRAP_SECRET</strong> и нужен
-          только для создания первого администратора.
         </div>
       </div>
       <div id="authGateError" class="authGateError hidden"></div>
@@ -2192,12 +2184,6 @@
       <div id="authSwitchWrap" class="authGateSwitch">
         <span id="authSwitchText" class="authGateMessage" style="margin:0;"></span>
         <button id="authSwitchBtn" class="authGateLink" type="button"></button>
-      </div>
-      <div id="authBootstrapWrap" class="authGateSwitch hidden">
-        <button id="authBootstrapBtn" class="authGateLink" type="button">Создать администратора</button>
-      </div>
-      <div id="authBackWrap" class="authGateSwitch hidden">
-        <button id="authBackBtn" class="authGateLink" type="button">Назад ко входу</button>
       </div>
     </div>
   </div>
@@ -3774,15 +3760,6 @@
         API.setSession(data);
         return data;
       },
-      async authBootstrap(payload, secret){
-        const data = await API.req("/api/auth/bootstrap/create-admin", {
-          method: "POST",
-          body: JSON.stringify(payload),
-          headers: { "X-Admin-Bootstrap-Secret": secret },
-        });
-        API.setSession(data);
-        return data;
-      },
 
 
       async ensureAuth(){
@@ -3956,9 +3933,6 @@
       if (!normalized) return "Ошибка авторизации";
       const map = {
         invalid_credentials: "Неверный логин или пароль.",
-        admin_already_exists: "Администратор уже создан. Войдите под своим логином.",
-        bootstrap_secret_not_configured: "Секрет администратора не задан на сервере (ADMIN_BOOTSTRAP_SECRET).",
-        invalid_bootstrap_secret: "Неверный секрет администратора.",
         login_already_exists: "Логин уже занят. Выберите другой.",
         user_inactive: "Пользователь отключён. Обратитесь к администратору.",
       };
@@ -3972,7 +3946,6 @@
 
     const AuthGateState = {
       mode: "login",
-      bootstrapAvailable: false,
     };
 
     function setAuthError(message){
@@ -4001,37 +3974,23 @@
       if (submitBtn){
         submitBtn.textContent = AuthGateState.mode === "register"
           ? "Зарегистрироваться"
-          : (AuthGateState.mode === "bootstrap" ? "Создать администратора" : "Войти");
+          : "Войти";
       }
 
       const switchWrap = $("#authSwitchWrap");
       const switchText = $("#authSwitchText");
       const switchBtn = $("#authSwitchBtn");
       if (switchWrap && switchText && switchBtn){
-        if (AuthGateState.mode === "bootstrap"){
-          switchWrap.classList.add("hidden");
+        switchWrap.classList.remove("hidden");
+        if (AuthGateState.mode === "login"){
+          switchText.textContent = "Нет аккаунта?";
+          switchBtn.textContent = "Регистрация";
+          switchBtn.dataset.next = "register";
         } else {
-          switchWrap.classList.remove("hidden");
-          if (AuthGateState.mode === "login"){
-            switchText.textContent = "Нет аккаунта?";
-            switchBtn.textContent = "Регистрация";
-            switchBtn.dataset.next = "register";
-          } else {
-            switchText.textContent = "Уже есть аккаунт?";
-            switchBtn.textContent = "Войти";
-            switchBtn.dataset.next = "login";
-          }
+          switchText.textContent = "Уже есть аккаунт?";
+          switchBtn.textContent = "Войти";
+          switchBtn.dataset.next = "login";
         }
-      }
-
-      const bootstrapWrap = $("#authBootstrapWrap");
-      if (bootstrapWrap){
-        const showBootstrap = AuthGateState.bootstrapAvailable && AuthGateState.mode !== "bootstrap";
-        bootstrapWrap.classList.toggle("hidden", !showBootstrap);
-      }
-      const backWrap = $("#authBackWrap");
-      if (backWrap){
-        backWrap.classList.toggle("hidden", AuthGateState.mode !== "bootstrap");
       }
     }
 
@@ -4058,26 +4017,10 @@
       updateAuthGate();
     }
 
-    async function loadBootstrapStatus(){
-      try{
-        const status = await API.get("/api/auth/bootstrap/status");
-        AuthGateState.bootstrapAvailable = !status?.admin_exists;
-        if (AuthGateState.bootstrapAvailable){
-          setAuthMode("bootstrap");
-        } else {
-          setAuthMode("login");
-        }
-      }catch{
-        AuthGateState.bootstrapAvailable = false;
-        setAuthMode("login");
-      }
-    }
-
     async function submitAuth(){
       const login = ($("#authLogin")?.value || "").trim();
       const password = ($("#authPassword")?.value || "").trim();
       const name = ($("#authName")?.value || "").trim();
-      const secret = ($("#authSecret")?.value || "").trim();
       const submitBtn = $("#authSubmitBtn");
 
       setAuthError("");
@@ -4093,12 +4036,6 @@
         }
         if (AuthGateState.mode === "register"){
           await API.authRegister({ login, password, name: name || undefined });
-        } else if (AuthGateState.mode === "bootstrap"){
-          if (!secret){
-            setAuthError("Введите секрет администратора.");
-            return;
-          }
-          await API.authBootstrap({ login, password, name: name || undefined }, secret);
         } else {
           await API.authLogin({ login, password });
         }
@@ -4113,7 +4050,7 @@
           submitBtn.disabled = false;
           submitBtn.textContent = AuthGateState.mode === "register"
             ? "Зарегистрироваться"
-            : (AuthGateState.mode === "bootstrap" ? "Создать администратора" : "Войти");
+            : "Войти";
         }
       }
     }
@@ -8512,8 +8449,6 @@
         const next = e.currentTarget?.dataset?.next || "login";
         setAuthMode(next);
       });
-      $("#authBootstrapBtn").addEventListener("click", ()=> setAuthMode("bootstrap"));
-      $("#authBackBtn").addEventListener("click", ()=> setAuthMode("login"));
 
       // nav
       $$(".navBtn").forEach(btn=>{
@@ -9087,8 +9022,6 @@
 
       // Hide settings tab label for viewer (still present but gated)
       // We'll keep it visible but will block opening.
-
-      await loadBootstrapStatus();
 
       try{
         const me = await API.ensureAuth();
