@@ -37,7 +37,7 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -3296,7 +3296,29 @@ def favicon():
 
 
 @APP.post("/api/auth/login", response_model=AuthOut)
-def auth_login(body: AuthLoginIn, request: Request, response: Response):
+async def auth_login(request: Request, response: Response):
+    payload: Dict[str, Any] = {}
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+    else:
+        try:
+            form = await request.form()
+            payload = dict(form)
+        except Exception:
+            payload = {}
+
+    try:
+        body = AuthLoginIn(
+            login=str(payload.get("login", "")).strip(),
+            password=str(payload.get("password", "")).strip(),
+        )
+    except ValidationError:
+        raise HTTPException(status_code=422, detail="invalid_payload")
+
     login_norm = normalize_login(body.login)
     validate_login(login_norm)
     key = f"{request.client.host if request.client else 'unknown'}|{login_norm}"

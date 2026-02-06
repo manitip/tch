@@ -68,7 +68,7 @@
   <div class="card">
     <h1>Вход</h1>
     <p>Введите логин и пароль, выданные администратором.</p>
-    <form id="loginForm">
+    <form id="loginForm" method="post" action="/api/auth/login">
       <label for="login">Логин</label>
       <input id="login" name="login" autocomplete="username" required />
       <label for="password">Пароль</label>
