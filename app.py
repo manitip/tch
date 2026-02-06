@@ -2424,18 +2424,36 @@ def make_auth_response(row: sqlite3.Row) -> Dict[str, Any]:
     }
 
 
-def _cookie_secure() -> bool:
+def _cookie_secure(request: Optional[Request] = None) -> bool:
+    if request is not None:
+        forwarded_proto = (
+            request.headers.get("x-forwarded-proto")
+            or request.headers.get("x-forwarded-protocol")
+        )
+        if forwarded_proto:
+            proto = forwarded_proto.split(",")[0].strip().lower()
+            if proto:
+                return proto == "https"
+        try:
+            return request.url.scheme == "https"
+        except Exception:
+            pass
     return CFG.APP_URL.lower().startswith("https://")
 
 
-def set_session_cookies(response: Response, token: str) -> str:
+def set_session_cookies(
+    response: Response,
+    token: str,
+    request: Optional[Request] = None,
+) -> str:
     max_age = 7 * 24 * 3600
     csrf_token = secrets.token_urlsafe(16)
+    secure = _cookie_secure(request)
     response.set_cookie(
         "session",
         token,
         httponly=True,
-        secure=_cookie_secure(),
+        secure=secure,
         samesite="lax",
         max_age=max_age,
     )
@@ -2443,7 +2461,7 @@ def set_session_cookies(response: Response, token: str) -> str:
         "csrf_token",
         csrf_token,
         httponly=False,
-        secure=_cookie_secure(),
+        secure=secure,
         samesite="lax",
         max_age=max_age,
     )
@@ -3341,7 +3359,7 @@ async def auth_login(request: Request, response: Response):
     db_exec("UPDATE users SET last_login_at=? WHERE id=?;", (now, int(row["id"])))
     log_auth_event("login", login_norm, request, "success", user_id=int(row["id"]))
     auth = make_auth_response(row)
-    set_session_cookies(response, auth["token"])
+    set_session_cookies(response, auth["token"], request)
     return auth
 
 
@@ -3388,7 +3406,7 @@ def auth_bootstrap_create_admin(body: AuthBootstrapIn, request: Request, respons
     )
     log_auth_event("bootstrap_admin", login_norm, request, "success", user_id=int(row["id"]))
     auth = make_auth_response(row)
-    set_session_cookies(response, auth["token"])
+    set_session_cookies(response, auth["token"], request)
     return auth
 
 
