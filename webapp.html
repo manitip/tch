@@ -2118,15 +2118,15 @@
       <div class="authGateForm">
         <div class="authGateField" data-auth-mode="login register bootstrap">
           <label class="authGateLabel" for="authLogin">Логин</label>
-          <input id="authLogin" class="authGateInput" type="text" autocomplete="username" />
+          <input id="authLogin" class="authGateInput" type="text" autocomplete="username" placeholder="например, ivan.petrov" />
         </div>
         <div class="authGateField" data-auth-mode="login register bootstrap">
           <label class="authGateLabel" for="authPassword">Пароль</label>
-          <input id="authPassword" class="authGateInput" type="password" autocomplete="current-password" />
+          <input id="authPassword" class="authGateInput" type="password" autocomplete="current-password" placeholder="минимум 6 символов" />
         </div>
         <div class="authGateField" data-auth-mode="register bootstrap">
           <label class="authGateLabel" for="authName">Имя (опционально)</label>
-          <input id="authName" class="authGateInput" type="text" autocomplete="name" />
+          <input id="authName" class="authGateInput" type="text" autocomplete="name" placeholder="как к вам обращаться" />
         </div>
         <div class="authGateField" data-auth-mode="bootstrap">
           <label class="authGateLabel" for="authSecret">Секрет администратора</label>
@@ -4042,7 +4042,7 @@
         const parsed = parseApiError(err);
         setAuthError(parsed.detail || "Ошибка авторизации");
       }
-
+    }
 
     /**********************
      * App state
