@@ -60,3 +60,16 @@ def test_login_with_existing_session_includes_csrf(client, user_credentials):
         cookies=first.cookies,
     )
     assert res.status_code == 200
+
+
+def test_login_with_existing_session_without_csrf_still_works(client, user_credentials):
+    login, password = user_credentials
+    first = client.post("/api/auth/login", json={"login": login, "password": password})
+    assert first.status_code == 200
+
+    res = client.post(
+        "/api/auth/login",
+        json={"login": login, "password": password},
+        cookies={"session": first.cookies.get("session")},
+    )
+    assert res.status_code == 200
