@@ -1861,6 +1861,11 @@
     .authGateError{
       color: var(--danger);
     }
+    .authGateHint{
+      font-size: 12px;
+      color: var(--muted2);
+      line-height: 1.4;
+    }
     .authGateActions{
       display: flex;
       gap: 10px;
@@ -2131,6 +2136,10 @@
         <div class="authGateField" data-auth-mode="bootstrap">
           <label class="authGateLabel" for="authSecret">Секрет администратора</label>
           <input id="authSecret" class="authGateInput" type="password" autocomplete="off" />
+        </div>
+        <div class="authGateHint" data-auth-mode="bootstrap">
+          Секрет задаётся на сервере через переменную <strong>ADMIN_BOOTSTRAP_SECRET</strong> и нужен
+          только для создания первого администратора.
         </div>
       </div>
       <div id="authGateError" class="authGateError hidden"></div>
@@ -3907,6 +3916,24 @@
       return { status, detail };
     }
 
+    function formatAuthError(detail){
+      const normalized = String(detail || "").trim();
+      if (!normalized) return "Ошибка авторизации";
+      const map = {
+        invalid_credentials: "Неверный логин или пароль.",
+        admin_already_exists: "Администратор уже создан. Войдите под своим логином.",
+        bootstrap_secret_not_configured: "Секрет администратора не задан на сервере (ADMIN_BOOTSTRAP_SECRET).",
+        invalid_bootstrap_secret: "Неверный секрет администратора.",
+        login_already_exists: "Логин уже занят. Выберите другой.",
+        user_inactive: "Пользователь отключён. Обратитесь к администратору.",
+      };
+      if (map[normalized]) return map[normalized];
+      if (/failed to fetch|networkerror|load failed/i.test(normalized)){
+        return "Не удалось связаться с сервером. Проверьте доступность API и параметр ?api=.";
+      }
+      return normalized;
+    }
+
 
     const AuthGateState = {
       mode: "login",
@@ -4016,6 +4043,7 @@
       const password = ($("#authPassword")?.value || "").trim();
       const name = ($("#authName")?.value || "").trim();
       const secret = ($("#authSecret")?.value || "").trim();
+      const submitBtn = $("#authSubmitBtn");
 
       setAuthError("");
       if (!login || !password){
@@ -4024,6 +4052,10 @@
       }
 
       try{
+        if (submitBtn){
+          submitBtn.disabled = true;
+          submitBtn.textContent = "Проверяем…";
+        }
         if (AuthGateState.mode === "register"){
           await API.authRegister({ login, password, name: name || undefined });
         } else if (AuthGateState.mode === "bootstrap"){
@@ -4040,7 +4072,14 @@
         await handleAuthenticated(me);
       }catch(err){
         const parsed = parseApiError(err);
-        setAuthError(parsed.detail || "Ошибка авторизации");
+        setAuthError(formatAuthError(parsed.detail));
+      }finally{
+        if (submitBtn){
+          submitBtn.disabled = false;
+          submitBtn.textContent = AuthGateState.mode === "register"
+            ? "Зарегистрироваться"
+            : (AuthGateState.mode === "bootstrap" ? "Создать администратора" : "Войти");
+        }
       }
     }
 
