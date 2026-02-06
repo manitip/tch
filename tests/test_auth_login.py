@@ -73,3 +73,18 @@ def test_login_with_existing_session_without_csrf_still_works(client, user_crede
         cookies={"session": first.cookies.get("session")},
     )
     assert res.status_code == 200
+
+
+def test_register_creates_admin_for_first_user(client):
+    res = client.post("/api/auth/register", json={"login": "owner", "password": "secret12"})
+    assert res.status_code == 201
+    data = res.json()
+    assert data["user"]["role"] == "admin"
+    assert res.cookies.get("session")
+
+
+def test_register_creates_viewer_when_users_exist(client, user_credentials):
+    res = client.post("/api/auth/register", json={"login": "viewer1", "password": "secret12"})
+    assert res.status_code == 201
+    data = res.json()
+    assert data["user"]["role"] == "viewer"

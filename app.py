@@ -153,7 +153,6 @@ class Config:
     APP_URL: str
     DB_PATH: str
     SESSION_SECRET: str
-    ADMIN_BOOTSTRAP_SECRET: str
     TZ: str
 
     def tzinfo(self) -> ZoneInfo:
@@ -173,7 +172,6 @@ def load_config() -> Config:
         APP_URL=os.getenv("APP_URL", "http://localhost:8000").strip(),
         DB_PATH=db_path,
         SESSION_SECRET=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)).strip(),
-        ADMIN_BOOTSTRAP_SECRET=os.getenv("ADMIN_BOOTSTRAP_SECRET", "").strip(),
         TZ=os.getenv("TIMEZONE", "Europe/Warsaw").strip(),
     )
 
@@ -262,7 +260,7 @@ def verify_password(raw_password: str, stored_hash: str) -> bool:
         return False
 
 LOGIN_RE = re.compile(r"^[a-zA-Z0-9._-]{4,32}$")
-PASSWORD_MIN_LEN = 12
+PASSWORD_MIN_LEN = 6
 COMMON_PASSWORDS = {
     "1234567890",
     "123456789",
@@ -290,8 +288,6 @@ def validate_password(raw_password: str) -> None:
     if len(pw) < PASSWORD_MIN_LEN:
         raise HTTPException(status_code=400, detail="weak_password")
     if pw.lower() in COMMON_PASSWORDS:
-        raise HTTPException(status_code=400, detail="weak_password")
-    if pw.isdigit():
         raise HTTPException(status_code=400, detail="weak_password")
 
 
@@ -382,24 +378,6 @@ def init_db() -> None:
     )
     ensure_user_profile_fields()
     ensure_user_auth_fields()
-    db_exec(
-        """
-        CREATE TABLE IF NOT EXISTS registration_requests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            login TEXT NOT NULL,
-            password_hash TEXT NOT NULL,
-            name TEXT,
-            team TEXT,
-            role TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending',
-            created_at TEXT NOT NULL,
-            reviewed_at TEXT,
-            reviewed_by_user_id INTEGER,
-            UNIQUE(login),
-            FOREIGN KEY (reviewed_by_user_id) REFERENCES users(id) ON DELETE SET NULL
-        );
-        """
-    )
     # months
     db_exec(
         """
@@ -2266,12 +2244,6 @@ class AuthRegisterIn(BaseModel):
     name: Optional[str] = None
 
 
-class AuthBootstrapIn(BaseModel):
-    login: str
-    password: str
-    name: Optional[str] = None
-
-
 class AdminUserCreateIn(BaseModel):
     login: str
     password: str
@@ -2345,12 +2317,6 @@ def get_current_user(request: Request) -> sqlite3.Row:
     return u
 
 
-
-def admin_exists() -> bool:
-    row = db_fetchone(
-        "SELECT id FROM users WHERE role IN ('admin','owner') AND is_active=1 LIMIT 1;"
-    )
-    return bool(row)
 
 def has_registered_web_users() -> bool:
     row = db_fetchone("SELECT id FROM users LIMIT 1;")
@@ -3372,39 +3338,18 @@ def auth_logout(response: Response):
 
 @APP.post("/api/auth/register", response_model=AuthOut, status_code=201)
 def auth_register(body: AuthRegisterIn, request: Request, response: Response):
-    raise HTTPException(status_code=403, detail="registration_disabled")
-
-
-@APP.get("/api/auth/bootstrap/status")
-def auth_bootstrap_status():
-    return {
-        "admin_exists": admin_exists(),
-        "has_registered_web_users": has_registered_web_users(),
-    }
-
-
-@APP.post("/api/auth/bootstrap/create-admin", response_model=AuthOut)
-def auth_bootstrap_create_admin(body: AuthBootstrapIn, request: Request, response: Response):
-    if admin_exists():
-        raise HTTPException(status_code=409, detail="admin_already_exists")
-    secret = CFG.ADMIN_BOOTSTRAP_SECRET
-    if not secret:
-        raise HTTPException(status_code=500, detail="bootstrap_secret_not_configured")
-    provided = (request.headers.get("x-admin-bootstrap-secret") or "").strip()
-    if not provided or not hmac.compare_digest(provided, secret):
-        raise HTTPException(status_code=401, detail="invalid_bootstrap_secret")
-
     login_norm = normalize_login(body.login)
     validate_login(login_norm)
     validate_password(body.password)
 
+    role = "admin" if not has_registered_web_users() else "viewer"
     row = create_user(
         login=login_norm,
         password=body.password,
-        role="admin",
+        role=role,
         name=body.name,
     )
-    log_auth_event("bootstrap_admin", login_norm, request, "success", user_id=int(row["id"]))
+    log_auth_event("register", login_norm, request, "success", user_id=int(row["id"]))
     auth = make_auth_response(row)
     set_session_cookies(response, auth["token"], request)
     return auth
