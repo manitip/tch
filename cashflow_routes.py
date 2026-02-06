@@ -12,8 +12,7 @@ FastAPI роуты для модуля подтверждения наличны
     import cashflow_models
     # внутри init_db(): cashflow_models.init_cashflow_db(conn)
 
-    import cashflow_bot
-    # внутри lifespan после создания bot: cashflow_bot.set_bot(bot)
+    (уведомления отправляются через notifications_service)
 """
 
 from __future__ import annotations
@@ -23,6 +22,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
+import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, Request
@@ -30,11 +30,12 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 import cashflow_models as m
-import cashflow_bot as b
+import notifications_service as notifications
 
 import datetime as dt
 
 router = APIRouter()
+CASHFLOW_LOG = logging.getLogger("CASHFLOW")
 
 
 # ---------------------------
@@ -108,7 +109,7 @@ class CashRequestCreateIn(BaseModel):
 
 
 class CashResendIn(BaseModel):
-    target_telegram_ids: Optional[List[int]] = Field(None, description="Если не задано — всем отказавшим на попытке 1")
+    target_user_ids: Optional[List[int]] = Field(None, description="Если не задано — всем отказавшим на попытке 1")
     admin_comment: Optional[str] = None
 
 
@@ -118,20 +119,6 @@ class CashSignIn(BaseModel):
 
 class CashRefuseIn(BaseModel):
     reason: str = Field(..., min_length=1)
-
-
-# ---------------------------
-# HTML entry (cashapp)
-# ---------------------------
-
-
-@router.get("/cashapp")
-def cashapp_html():
-    """Отдельный интерфейс подписанта (не бухгалтерия)."""
-    path = Path(__file__).resolve().parent / "cashapp.html"
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="cashapp.html not found")
-    return FileResponse(str(path), media_type="text/html")
 
 
 # ---------------------------
@@ -156,25 +143,25 @@ def create_request(
             account=body.account,
             op_type=body.op_type,
             amount=float(body.amount),
-            created_by_telegram_id=int(u["telegram_id"]),
+            created_by_user_id=int(u["id"]),
             source_kind=body.source_kind,
             source_id=body.source_id,
         )
         view = m.build_request_view(conn, request_id)
         req = view["request"]
-        signers = [p["telegram_id"] for p in view["participants"] if not p["is_admin"]]
+        signers = [p["user_id"] for p in view["participants"] if not p["is_admin"]]
 
-    # уведомляем подписантов
-    bg.add_task(
-        b.notify_signers_new_request,
-        request_id=request_id,
-        account=req["account"],
-        op_type=req["op_type"],
-        amount=float(req["amount"]),
-        signer_ids=signers,
-        is_retry=False,
-        admin_comment=None,
+    notifications.notify_users(
+        signers,
+        event_type="cashflow_request_created",
+        payload={
+            "request_id": request_id,
+            "account": req["account"],
+            "op_type": req["op_type"],
+            "amount": float(req["amount"]),
+        },
     )
+    CASHFLOW_LOG.info("cash_request_created | request_id=%s user_id=%s account=%s op_type=%s amount=%s", request_id, u["id"], req["account"], req["op_type"], req["amount"])
     return {"id": request_id, "item": view}
 
 
@@ -191,7 +178,7 @@ def my_requests(
     with db_connect() as conn:
         items = m.list_my_cash_requests(
             conn,
-            telegram_id=int(u["telegram_id"]),
+            user_id=int(u["id"]),
             account=account,
             only_open=bool(only_open),
             limit=limit,
@@ -226,8 +213,8 @@ def request_detail(
         view = m.build_request_view(conn, int(request_id))
         # доступ: админ или участник
         if str(u["role"]) != "admin":
-            tid = int(u["telegram_id"])
-            if not any(int(p["telegram_id"]) == tid for p in view["participants"]):
+            uid = int(u["id"])
+            if not any(int(p["user_id"]) == uid for p in view["participants"]):
                 raise HTTPException(status_code=403, detail="Not a participant")
         return view
 
@@ -253,7 +240,7 @@ def sign_request(
                 conn,
                 cfg,
                 request_id=int(request_id),
-                telegram_id=int(u["telegram_id"]),
+                user_id=int(u["id"]),
                 signature_data_url=body.signature,
                 as_admin=False,
             )
@@ -272,30 +259,32 @@ def sign_request(
         finalize(int(request_id))
 
 
-    # уведомить ответственного админа
-    bg.add_task(
-        b.notify_admin_about_decision,
-        admin_id=int(req["admin_telegram_id"]),
-        request_id=int(request_id),
-        account=req["account"],
-        op_type=req["op_type"],
-        amount=float(req["amount"]),
-        signer_name=signer_name,
-        decision="SIGNED",
-        reason=None,
+    notifications.notify_users(
+        [int(req["admin_user_id"])],
+        event_type="cashflow_decision",
+        payload={
+            "request_id": int(request_id),
+            "account": req["account"],
+            "op_type": req["op_type"],
+            "amount": float(req["amount"]),
+            "signer_name": signer_name,
+            "decision": "SIGNED",
+        },
     )
-    # если финализировано — уведомить инициатора
-    if req.get("created_by_telegram_id") and req.get("status") == "FINAL":
-        bg.add_task(
-            b.notify_initiator_final,
-            initiator_id=int(req["created_by_telegram_id"]),
-            request_id=int(request_id),
-            account=req["account"],
-            op_type=req["op_type"],
-            amount=float(req["amount"]),
-            status=str(req["status"]),
+    if req.get("created_by_user_id") and req.get("status") == "FINAL":
+        notifications.notify_users(
+            [int(req["created_by_user_id"])],
+            event_type="cashflow_finalized",
+            payload={
+                "request_id": int(request_id),
+                "account": req["account"],
+                "op_type": req["op_type"],
+                "amount": float(req["amount"]),
+                "status": str(req["status"]),
+            },
         )
 
+    CASHFLOW_LOG.info("cash_request_signed | request_id=%s user_id=%s status=%s", request_id, u["id"], req.get("status"))
     return {"ok": True, "item": view}
 
 
@@ -313,7 +302,7 @@ def refuse_request(
             m.record_refusal(
                 conn,
                 request_id=int(request_id),
-                telegram_id=int(u["telegram_id"]),
+                user_id=int(u["id"]),
                 reason=str(body.reason).strip(),
             )
         except PermissionError as e:
@@ -326,16 +315,20 @@ def refuse_request(
         signer_name = str(u["name"])
 
     bg.add_task(
-        b.notify_admin_about_decision,
-        admin_id=int(req["admin_telegram_id"]),
-        request_id=int(request_id),
-        account=req["account"],
-        op_type=req["op_type"],
-        amount=float(req["amount"]),
-        signer_name=signer_name,
-        decision="REFUSED",
-        reason=str(body.reason).strip(),
+        notifications.notify_users,
+        [int(req["admin_user_id"])],
+        event_type="cashflow_decision",
+        payload={
+            "request_id": int(request_id),
+            "account": req["account"],
+            "op_type": req["op_type"],
+            "amount": float(req["amount"]),
+            "signer_name": signer_name,
+            "decision": "REFUSED",
+            "reason": str(body.reason).strip(),
+        },
     )
+    CASHFLOW_LOG.info("cash_request_refused | request_id=%s user_id=%s", request_id, u["id"])
     return {"ok": True, "item": view}
 
 
@@ -359,8 +352,8 @@ def admin_resend(
             targets = m.resend_for_refusals(
                 conn,
                 request_id=int(request_id),
-                admin_telegram_id=int(u["telegram_id"]),
-                target_telegram_ids=body.target_telegram_ids,
+                admin_user_id=int(u["id"]),
+                target_user_ids=body.target_user_ids,
                 admin_comment=body.admin_comment,
             )
             view = m.build_request_view(conn, int(request_id))
@@ -372,15 +365,18 @@ def admin_resend(
 
     if bg is not None:
         bg.add_task(
-            b.notify_signers_new_request,
-            request_id=int(request_id),
-            account=req["account"],
-            op_type=req["op_type"],
-            amount=float(req["amount"]),
-            signer_ids=targets,
-            is_retry=True,
-            admin_comment=req.get("admin_comment"),
+            notifications.notify_users,
+            targets,
+            event_type="cashflow_request_retry",
+            payload={
+                "request_id": int(request_id),
+                "account": req["account"],
+                "op_type": req["op_type"],
+                "amount": float(req["amount"]),
+                "admin_comment": req.get("admin_comment"),
+            },
         )
+    CASHFLOW_LOG.info("cash_request_resend | request_id=%s admin_user_id=%s targets=%s", request_id, u["id"], targets)
     return {"ok": True, "targets": targets, "item": view}
 
 
@@ -404,12 +400,13 @@ def admin_cancel(
     db_connect = _app_db_connect()
     with db_connect() as conn:
         try:
-            m.cancel_request(conn, request_id=int(request_id), admin_telegram_id=int(u["telegram_id"]), comment=comment)
+            m.cancel_request(conn, request_id=int(request_id), admin_user_id=int(u["id"]), comment=comment)
             view = m.build_request_view(conn, int(request_id))
         except PermissionError as e:
             raise HTTPException(status_code=403, detail=str(e))
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
+    CASHFLOW_LOG.info("cash_request_cancel | request_id=%s admin_user_id=%s", request_id, u["id"])
     return {"ok": True, "item": view}
 
 
@@ -418,10 +415,10 @@ def admin_cancel(
 # ---------------------------
 
 
-@router.get("/api/cashflow/requests/{request_id}/participants/{telegram_id}/signature.png")
+@router.get("/api/cashflow/requests/{request_id}/participants/{user_id}/signature.png")
 def get_signature_png(
     request_id: int,
-    telegram_id: int,
+    user_id: int,
     u=Depends(_app_require_role("admin", "cash_signer")),
 ):
     """Возвращает эффективную подпись участника: attempt=2 если есть, иначе attempt=1."""
@@ -433,24 +430,24 @@ def get_signature_png(
         view = m.build_request_view(conn, int(request_id))
 
         role = str(u["role"])
-        caller_tid = int(u["telegram_id"])
+        caller_uid = int(u["id"])
 
         # доступ: админ ИЛИ тот, у кого есть доступ к акту ИЛИ участник заявки
         if role != "admin":
             can_view_act = False
             try:
-                can_view_act = _user_can_view_withdraw_act(caller_tid, role)
+                can_view_act = _user_can_view_withdraw_act(caller_uid, role)
             except Exception:
                 can_view_act = False
 
             if not can_view_act:
-                if not any(int(p["telegram_id"]) == caller_tid for p in view["participants"]):
+                if not any(int(p["user_id"]) == caller_uid for p in view["participants"]):
                     raise HTTPException(status_code=403, detail="Not allowed")
 
         # находим нужного участника
         part = None
         for p in view["participants"]:
-            if int(p["telegram_id"]) == int(telegram_id):
+            if int(p["user_id"]) == int(user_id):
                 part = p
                 break
         if not part:
@@ -477,14 +474,14 @@ def get_signature_png(
 # ---------------------------
 
 
-def _user_can_view_withdraw_act(telegram_id: int, role: str) -> bool:
+def _user_can_view_withdraw_act(user_id: int, role: str) -> bool:
     if role in ("owner", "admin"):
         return True
     db_connect = _app_db_connect()
     with db_connect() as conn:
         row = conn.execute(
-            "SELECT role, is_active, cash_ops FROM users WHERE telegram_id=?;",
-            (int(telegram_id),),
+            "SELECT role, is_active, cash_ops FROM users WHERE id=?;",
+            (int(user_id),),
         ).fetchone()
     if not row or int(row["is_active"] or 0) != 1:
         return False
@@ -510,7 +507,7 @@ def withdraw_act(
     date_to: Optional[str] = Query(None),
     u=Depends(_app_require_role("admin", "cash_signer")),
 ):
-    if not _user_can_view_withdraw_act(int(u["telegram_id"]), str(u["role"])):
+    if not _user_can_view_withdraw_act(int(u["id"]), str(u["role"])):
         raise HTTPException(status_code=403, detail="No access to withdraw act")
     _ensure_cashflow_tables()
     db_connect = _app_db_connect()
