@@ -3060,7 +3060,17 @@ async def auth_debug_middleware(request: Request, call_next):
 
     path = request.url.path
     unsafe_method = request.method.upper() not in {"GET", "HEAD", "OPTIONS"}
-    if unsafe_method and path.startswith("/api/") and request.cookies.get("session"):
+    csrf_exempt = {
+        "/api/auth/login",
+        "/api/auth/register",
+        "/api/auth/bootstrap/create-admin",
+    }
+    if (
+        unsafe_method
+        and path.startswith("/api/")
+        and path not in csrf_exempt
+        and request.cookies.get("session")
+    ):
         csrf_cookie = request.cookies.get("csrf_token")
         csrf_header = request.headers.get("x-csrf-token")
         if not csrf_cookie or not csrf_header or csrf_cookie != csrf_header:
