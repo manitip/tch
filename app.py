@@ -262,7 +262,7 @@ def verify_password(raw_password: str, stored_hash: str) -> bool:
         return False
 
 LOGIN_RE = re.compile(r"^[a-zA-Z0-9._-]{4,32}$")
-PASSWORD_MIN_LEN = 12
+PASSWORD_MIN_LEN = 6
 COMMON_PASSWORDS = {
     "1234567890",
     "123456789",
@@ -290,8 +290,6 @@ def validate_password(raw_password: str) -> None:
     if len(pw) < PASSWORD_MIN_LEN:
         raise HTTPException(status_code=400, detail="weak_password")
     if pw.lower() in COMMON_PASSWORDS:
-        raise HTTPException(status_code=400, detail="weak_password")
-    if pw.isdigit():
         raise HTTPException(status_code=400, detail="weak_password")
 
 
@@ -3372,7 +3370,21 @@ def auth_logout(response: Response):
 
 @APP.post("/api/auth/register", response_model=AuthOut, status_code=201)
 def auth_register(body: AuthRegisterIn, request: Request, response: Response):
-    raise HTTPException(status_code=403, detail="registration_disabled")
+    login_norm = normalize_login(body.login)
+    validate_login(login_norm)
+    validate_password(body.password)
+
+    role = "admin" if not has_registered_web_users() else "viewer"
+    row = create_user(
+        login=login_norm,
+        password=body.password,
+        role=role,
+        name=body.name,
+    )
+    log_auth_event("register", login_norm, request, "success", user_id=int(row["id"]))
+    auth = make_auth_response(row)
+    set_session_cookies(response, auth["token"], request)
+    return auth
 
 
 @APP.get("/api/auth/bootstrap/status")
