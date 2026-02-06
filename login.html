@@ -39,6 +39,28 @@
     }
     h1{ margin:0 0 12px; font-size:22px; }
     p{ margin:0 0 20px; color:var(--muted); }
+    .tabs{
+      display:flex;
+      gap:8px;
+      margin-bottom:16px;
+    }
+    .tab{
+      flex:1;
+      padding:10px 12px;
+      border-radius:12px;
+      background:transparent;
+      border:1px solid rgba(148,163,184,.3);
+      color:var(--text);
+      cursor:pointer;
+      font-size:14px;
+    }
+    .tab.active{
+      background:var(--accent);
+      border-color:var(--accent);
+      color:white;
+    }
+    .panel{ display:none; }
+    .panel.active{ display:block; }
     label{ display:block; font-size:13px; margin:14px 0 6px; color:var(--muted); }
     input{
       width:100%;
@@ -66,17 +88,38 @@
 </head>
 <body>
   <div class="card">
-    <h1>Вход</h1>
-    <p>Введите логин и пароль, выданные администратором.</p>
-    <form id="loginForm" method="post" action="/api/auth/login">
+    <div class="tabs">
+      <button class="tab active" type="button" data-target="loginPanel">Вход</button>
+      <button class="tab" type="button" data-target="registerPanel">Регистрация</button>
+    </div>
+    <div id="loginPanel" class="panel active">
+      <h1>Вход</h1>
+      <p>Введите логин и пароль.</p>
+      <form id="loginForm" method="post" action="/api/auth/login">
       <label for="login">Логин</label>
       <input id="login" name="login" autocomplete="username" required />
       <label for="password">Пароль</label>
       <input id="password" name="password" type="password" autocomplete="current-password" required />
       <button type="submit">Войти</button>
       <div id="error" class="error"></div>
-    </form>
-    <div class="hint">Нет доступа? Обратитесь к администратору для сброса пароля.</div>
+      </form>
+      <div class="hint">Нет доступа? Зарегистрируйтесь или обратитесь к администратору.</div>
+    </div>
+    <div id="registerPanel" class="panel">
+      <h1>Регистрация</h1>
+      <p>Создайте логин и пароль для входа.</p>
+      <form id="registerForm" method="post" action="/api/auth/register">
+        <label for="regLogin">Логин</label>
+        <input id="regLogin" name="login" autocomplete="username" required />
+        <label for="regName">Имя (необязательно)</label>
+        <input id="regName" name="name" autocomplete="name" />
+        <label for="regPassword">Пароль</label>
+        <input id="regPassword" name="password" type="password" autocomplete="new-password" required />
+        <button type="submit">Зарегистрироваться</button>
+        <div id="registerError" class="error"></div>
+      </form>
+      <div class="hint">Первый зарегистрированный пользователь станет администратором.</div>
+    </div>
   </div>
   <script>
     async function redirectIfLoggedIn(){
@@ -97,6 +140,18 @@
       const parts = value.split(`; ${name}=`);
       if (parts.length === 2) return parts.pop().split(";").shift();
       return "";
+    }
+
+    function setupTabs(){
+      const tabs = Array.from(document.querySelectorAll(".tab"));
+      const panels = Array.from(document.querySelectorAll(".panel"));
+      tabs.forEach((tab) => {
+        tab.addEventListener("click", () => {
+          const target = tab.dataset.target;
+          tabs.forEach((t) => t.classList.toggle("active", t === tab));
+          panels.forEach((panel) => panel.classList.toggle("active", panel.id === target));
+        });
+      });
     }
 
     async function submitLogin(e){
@@ -133,7 +188,39 @@
       }
     }
 
+    async function submitRegister(e){
+      e.preventDefault();
+      const login = document.getElementById("regLogin").value.trim();
+      const name = document.getElementById("regName").value.trim();
+      const password = document.getElementById("regPassword").value.trim();
+      const errorEl = document.getElementById("registerError");
+      errorEl.textContent = "";
+      try{
+        const res = await fetch("/api/auth/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ login, password, name: name || null }),
+        });
+        const data = await res.json().catch(()=> ({}));
+        if (!res.ok){
+          errorEl.textContent = data.detail || "Ошибка регистрации";
+          return;
+        }
+        const role = data?.user?.role;
+        if (role === "cash_signer"){
+          window.location.href = "/cash";
+        } else {
+          window.location.href = "/app";
+        }
+      }catch(err){
+        errorEl.textContent = err?.message || "Ошибка регистрации";
+      }
+    }
+
     document.getElementById("loginForm").addEventListener("submit", submitLogin);
+    document.getElementById("registerForm").addEventListener("submit", submitRegister);
+    setupTabs();
     redirectIfLoggedIn();
   </script>
 </body>
