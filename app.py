@@ -1,6 +1,5 @@
 # app.py
-# FastAPI API + планировщик отчётов + aiogram bot (единое приложение)
-# По ТЗ: SQLite, allowlist (users.json), роли, magic-link auth, расчёты как Excel.
+# FastAPI API (SQLite), web auth, бухгалтерия + cashflow.
 
 from __future__ import annotations
 
@@ -37,26 +36,14 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from zoneinfo import ZoneInfo
 
-# aiogram v3
-from aiogram import Bot, Dispatcher, Router, F
-from aiogram.filters import Command
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from aiogram.types import (
-    Message,
-    CallbackQuery,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
-    WebAppInfo,
-)
+import bcrypt
 
 # Optional for Excel export
 try:
@@ -72,12 +59,35 @@ import logging
 import uuid
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL, logging.INFO),
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
+LOG_FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+BASE_DIR = Path(__file__).resolve().parent
+LOG_DIR = BASE_DIR / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 
+
+def _make_handler(filename: str) -> logging.Handler:
+    handler = logging.FileHandler(LOG_DIR / filename)
+    handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    return handler
+
+
+root_logger = logging.getLogger()
+root_logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+if not root_logger.handlers:
+    root_logger.addHandler(logging.StreamHandler())
+
+APP_LOG = logging.getLogger("APP")
 AUTH_LOG = logging.getLogger("AUTH")
+CASHFLOW_LOG = logging.getLogger("CASHFLOW")
+
+for logger, filename in (
+    (APP_LOG, "app.log"),
+    (AUTH_LOG, "auth.log"),
+    (CASHFLOW_LOG, "cashflow.log"),
+):
+    logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+    if not any(isinstance(h, logging.FileHandler) and h.baseFilename.endswith(filename) for h in logger.handlers):
+        logger.addHandler(_make_handler(filename))
 
 
 def _mask_value(v: Optional[str]) -> str:
@@ -119,7 +129,6 @@ def auth_log(event: str, request: Optional[Request], **fields: Any) -> None:
     AUTH_LOG.info("%s | %s", event, json.dumps(meta, ensure_ascii=False))
 
 
-BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
 
 ATTACHMENTS_DIR = BASE_DIR / "uploads" / "receipts"
@@ -141,14 +150,9 @@ ACCOUNTS = ("main", "praise", "alpha")
 
 @dataclasses.dataclass
 class Config:
-    BOT_TOKEN: str
     APP_URL: str
-    WEBAPP_URL: str
     DB_PATH: str
-    USERS_JSON_PATH: str
     SESSION_SECRET: str
-    MAGIC_LINK_SECRET: str
-    MAGIC_LINK_TTL: int
     ADMIN_BOOTSTRAP_SECRET: str
     TZ: str
 
@@ -160,110 +164,21 @@ class Config:
 
 
 def load_config() -> Config:
-    bot_token = os.getenv("BOT_TOKEN", "").strip()
-    if not bot_token:
-        raise RuntimeError("BOT_TOKEN is required in .env / environment")
-
     base_dir = Path(__file__).resolve().parent
     db_path = os.getenv("DB_PATH", "db.sqlite3").strip()
-    users_json_path = os.getenv("USERS_JSON", "users.json").strip()
     if not os.path.isabs(db_path):
         db_path = str(base_dir / db_path)
-    if not os.path.isabs(users_json_path):
-        users_json_path = str(base_dir / users_json_path)
-
 
     return Config(
-        BOT_TOKEN=bot_token,
         APP_URL=os.getenv("APP_URL", "http://localhost:8000").strip(),
-        WEBAPP_URL=os.getenv("WEBAPP_URL", "http://localhost:8000/webapp").strip(),
         DB_PATH=db_path,
-        USERS_JSON_PATH=users_json_path,
         SESSION_SECRET=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)).strip(),
-        MAGIC_LINK_SECRET=os.getenv("MAGIC_LINK_SECRET", os.getenv("SESSION_SECRET", "")).strip(),
-        MAGIC_LINK_TTL=int(os.getenv("MAGIC_LINK_TTL", "120").strip() or "120"),
         ADMIN_BOOTSTRAP_SECRET=os.getenv("ADMIN_BOOTSTRAP_SECRET", "").strip(),
         TZ=os.getenv("TIMEZONE", "Europe/Warsaw").strip(),
     )
 
 
 CFG = load_config()
-
-def require_https_webapp_url(url: str) -> Optional[str]:
-    if not url:
-        return None
-    try:
-        parsed = urllib.parse.urlparse(url)
-    except Exception:
-        return None
-    if parsed.scheme.lower() != "https":
-        return None
-    return url
-
-
-def require_https_app_url(url: str) -> Optional[str]:
-    if not url:
-        return None
-    try:
-        parsed = urllib.parse.urlparse(url)
-    except Exception:
-        return None
-    if parsed.scheme.lower() != "https":
-        return None
-    return url
-
-
-def cashapp_webapp_url() -> Optional[str]:
-    primary = require_https_webapp_url(f"{CFG.APP_URL.rstrip('/')}/cashapp")
-    if primary:
-        cashapp_url = primary
-    else:
-        webapp_url = require_https_webapp_url(CFG.WEBAPP_URL)
-        if not webapp_url:
-            return None
-        parsed = urllib.parse.urlparse(webapp_url)
-        cashapp_url = urllib.parse.urlunparse(
-            parsed._replace(path="/cashapp", params="", query="", fragment="")
-        )
-    try:
-        parsed_cashapp = urllib.parse.urlparse(cashapp_url)
-        query = urllib.parse.parse_qs(parsed_cashapp.query)
-        api_url = require_https_app_url(CFG.APP_URL)
-        if api_url:
-            query["api"] = [api_url]
-        new_query = urllib.parse.urlencode(query, doseq=True)
-        return urllib.parse.urlunparse(parsed_cashapp._replace(query=new_query))
-    except Exception:
-        api_url = require_https_app_url(CFG.APP_URL)
-        if api_url:
-            sep = "&" if "?" in cashapp_url else "?"
-            return f"{cashapp_url}{sep}api={urllib.parse.quote(api_url)}"
-        return cashapp_url
-
-def build_webapp_url(screen: Optional[str] = None) -> Optional[str]:
-    url = require_https_webapp_url(CFG.WEBAPP_URL)
-    if not url:
-        return None
-    try:
-        parsed = urllib.parse.urlparse(url)
-        query = urllib.parse.parse_qs(parsed.query)
-        if screen:
-            query["screen"] = [screen]
-        api_url = require_https_app_url(CFG.APP_URL)
-        if api_url:
-            query["api"] = [api_url]
-        new_query = urllib.parse.urlencode(query, doseq=True)
-        return urllib.parse.urlunparse(parsed._replace(query=new_query))
-    except Exception:
-        sep = "&" if "?" in url else "?"
-        extra: List[str] = []
-        if screen:
-            extra.append(f"screen={urllib.parse.quote(screen)}")
-        api_url = require_https_app_url(CFG.APP_URL)
-        if api_url:
-            extra.append(f"api={urllib.parse.quote(api_url)}")
-        return f"{url}{sep}{'&'.join(extra)}" if extra else url
-
 
 
 # ---------------------------
@@ -319,27 +234,32 @@ def services_unique_has_account() -> bool:
             return True
     return False
 def hash_password(raw_password: str) -> str:
-    import base64
-    salt = secrets.token_bytes(16)
-    dk = hashlib.pbkdf2_hmac("sha256", raw_password.encode("utf-8"), salt, 120_000)
-    return f"pbkdf2_sha256${base64.b64encode(salt).decode()}${base64.b64encode(dk).decode()}"
+    if not raw_password:
+        raise HTTPException(status_code=400, detail="invalid_password")
+    hashed = bcrypt.hashpw(raw_password.encode("utf-8"), bcrypt.gensalt())
+    return hashed.decode("utf-8")
 
 
 def verify_password(raw_password: str, stored_hash: str) -> bool:
-    import base64
+    if not stored_hash:
+        return False
+    if stored_hash.startswith("pbkdf2_sha256$"):
+        import base64
+        try:
+            _algo, salt_b64, hash_b64 = stored_hash.split("$", 2)
+        except ValueError:
+            return False
+        try:
+            salt = base64.b64decode(salt_b64)
+            expected = base64.b64decode(hash_b64)
+        except Exception:
+            return False
+        dk = hashlib.pbkdf2_hmac("sha256", raw_password.encode("utf-8"), salt, 120_000)
+        return hmac.compare_digest(dk, expected)
     try:
-        algo, salt_b64, hash_b64 = stored_hash.split("$", 2)
+        return bcrypt.checkpw(raw_password.encode("utf-8"), stored_hash.encode("utf-8"))
     except ValueError:
         return False
-    if algo != "pbkdf2_sha256":
-        return False
-    try:
-        salt = base64.b64decode(salt_b64)
-        expected = base64.b64decode(hash_b64)
-    except Exception:
-        return False
-    dk = hashlib.pbkdf2_hmac("sha256", raw_password.encode("utf-8"), salt, 120_000)
-    return hmac.compare_digest(dk, expected)
 
 LOGIN_RE = re.compile(r"^[a-zA-Z0-9._-]{4,32}$")
 PASSWORD_MIN_LEN = 12
@@ -375,16 +295,6 @@ def validate_password(raw_password: str) -> None:
         raise HTTPException(status_code=400, detail="weak_password")
 
 
-def next_virtual_telegram_id() -> int:
-    row = db_fetchone("SELECT MIN(telegram_id) AS min_tid FROM users;")
-    try:
-        min_tid = int(row["min_tid"]) if row and row["min_tid"] is not None else 0
-    except Exception:
-        min_tid = 0
-    return min_tid - 1 if min_tid <= 0 else -1
-
-
-
 def ensure_user_profile_fields() -> None:
     cols = {r["name"] for r in db_fetchall("PRAGMA table_info(users);")}
     if "username" not in cols:
@@ -393,6 +303,9 @@ def ensure_user_profile_fields() -> None:
         db_exec("ALTER TABLE users ADD COLUMN first_name TEXT;")
     if "last_name" not in cols:
         db_exec("ALTER TABLE users ADD COLUMN last_name TEXT;")
+    if "email" not in cols:
+        db_exec("ALTER TABLE users ADD COLUMN email TEXT;")
+        db_exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);")
     if "is_active" not in cols:
         db_exec("ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1;")
         if "active" in cols:
@@ -403,6 +316,10 @@ def ensure_user_profile_fields() -> None:
         db_exec("ALTER TABLE users ADD COLUMN cash_ops TEXT;")
     if "updated_at" not in cols:
         db_exec("ALTER TABLE users ADD COLUMN updated_at TEXT;")
+    if "last_login_at" not in cols:
+        db_exec("ALTER TABLE users ADD COLUMN last_login_at TEXT;")
+    if "password_changed_at" not in cols:
+        db_exec("ALTER TABLE users ADD COLUMN password_changed_at TEXT;")
 
 
 def ensure_user_auth_fields() -> None:
@@ -418,12 +335,12 @@ def ensure_user_auth_fields() -> None:
 
     now = iso_now(CFG.tzinfo())
     rows = db_fetchall(
-        "SELECT id, telegram_id, login, password_hash, created_at, updated_at FROM users;"
+        "SELECT id, login, password_hash, created_at, updated_at FROM users;"
     )
     for row in rows:
         login = str(row["login"] or "").strip()
         if not login:
-            login = f"tg_{row['telegram_id']}"
+            login = f"user_{row['id']}"
         password_hash = str(row["password_hash"] or "").strip()
         if not password_hash:
             password_hash = hash_password(secrets.token_urlsafe(12))
@@ -437,20 +354,13 @@ def ensure_user_auth_fields() -> None:
             (login, password_hash, updated_at, int(row["id"])),
         )
 
-def ensure_magic_links_fields() -> None:
-    cols = {r["name"] for r in db_fetchall("PRAGMA table_info(magic_links);")}
-    if "target_app" not in cols:
-        db_exec("ALTER TABLE magic_links ADD COLUMN target_app TEXT NOT NULL DEFAULT 'webapp';")
-
-
-
 def init_db() -> None:
     # users
     db_exec(
         """
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            telegram_id INTEGER UNIQUE NOT NULL,
+            telegram_id INTEGER UNIQUE,
             username TEXT,
             first_name TEXT,
             last_name TEXT,            
@@ -462,6 +372,9 @@ def init_db() -> None:
             is_active INTEGER NOT NULL DEFAULT 1,
             cash_scopes TEXT,
             cash_ops TEXT,
+            email TEXT,
+            last_login_at TEXT,
+            password_changed_at TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT
         );
@@ -487,25 +400,6 @@ def init_db() -> None:
         );
         """
     )
-    db_exec(
-        """
-        CREATE TABLE IF NOT EXISTS magic_links (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            token_hash TEXT UNIQUE NOT NULL,
-            user_id INTEGER NOT NULL,
-            telegram_id INTEGER,
-            target_app TEXT NOT NULL,
-            expires_at TEXT NOT NULL,
-            used_at TEXT,
-            created_at TEXT NOT NULL,
-            created_ip TEXT,
-            ua TEXT,
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-        );
-        """
-    )
-    ensure_magic_links_fields()
-
     # months
     db_exec(
         """
@@ -685,18 +579,6 @@ def init_db() -> None:
         );
         """
     )
-    # bot subscribers (anyone who started bot can receive reports)
-    db_exec(
-        """
-        CREATE TABLE IF NOT EXISTS bot_subscribers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            telegram_id INTEGER UNIQUE NOT NULL,
-            active INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-        """
-    )
     # audit_log␊
     db_exec(
         """
@@ -782,6 +664,21 @@ def init_db() -> None:
         );
         """
     )
+
+    db_exec(
+        """
+        CREATE TABLE IF NOT EXISTS notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            type TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            is_read INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        """
+    )
+    db_exec("CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, is_read, created_at);")
 
     # Ensure settings row exists (id=1)
     row = db_fetchone("SELECT * FROM settings ORDER BY id LIMIT 1;")
@@ -1305,14 +1202,14 @@ def create_cashflow_collect_request_if_needed(
     income_type: str,
     month_id: int,
     service_date: str,
-    created_by_telegram_id: Optional[int],
+    created_by_user_id: Optional[int],
 ) -> Optional[int]:
     if cash_amount <= 0:
         return None
     account_norm = normalize_account(account)
     if account_norm not in ("main", "praise", "alpha"):
         return None
-    if not created_by_telegram_id:
+    if not created_by_user_id:
         return None
     import cashflow_models as cf
 
@@ -1328,7 +1225,6 @@ def create_cashflow_collect_request_if_needed(
     cfg = cf.CashflowConfig(
         base_dir=cfg_base.base_dir,
         db_path=Path(CFG.DB_PATH),
-        users_json_path=Path(CFG.USERS_JSON_PATH),
         uploads_dir=cfg_base.uploads_dir,
         timezone=cfg_base.timezone,
     )
@@ -1340,12 +1236,12 @@ def create_cashflow_collect_request_if_needed(
             FROM cash_requests
             WHERE account=? AND op_type='collect'
               AND status IN ('PENDING_SIGNERS','PENDING_ADMIN')
-              AND amount=? AND created_by_telegram_id=?
+              AND amount=? AND created_by_user_id=?
               AND source_kind='service' AND source_payload=?              
             ORDER BY id DESC
             LIMIT 1;
             """,
-            (account_norm, float(cash_amount), int(created_by_telegram_id), payload_json),
+            (account_norm, float(cash_amount), int(created_by_user_id), payload_json),
         ).fetchone()
         if existing:
             return int(existing["id"])
@@ -1356,7 +1252,7 @@ def create_cashflow_collect_request_if_needed(
             account=account_norm,
             op_type="collect",
             amount=float(cash_amount),
-            created_by_telegram_id=int(created_by_telegram_id),
+            created_by_user_id=int(created_by_user_id),
             source_kind="service",
             source_id=None,
             source_payload=payload,
@@ -1370,7 +1266,7 @@ def build_cashflow_signer_notification(request_id: int) -> Optional[Dict[str, An
         view = cf.build_request_view(conn, request_id)
     req = view.get("request") or {}
     participants = view.get("participants") or []
-    signers = [p["telegram_id"] for p in participants if not p.get("is_admin")]
+    signers = [p["user_id"] for p in participants if not p.get("is_admin")]
     if not signers:
         return None
     return {
@@ -1420,11 +1316,9 @@ def finalize_cashflow_collect_request(request_id: int) -> Optional[int]:
     cash = float(req["amount"])
     total = round(cashless + cash, 2)
 
-    actor_tid = req.get("created_by_telegram_id") or req.get("admin_telegram_id")
-    user_row = None
-    if actor_tid:
-        user_row = db_fetchone("SELECT id FROM users WHERE telegram_id=?;", (int(actor_tid),))
-    user_id = int(user_row["id"]) if user_row else None
+    user_id = req.get("created_by_user_id") or req.get("admin_user_id")
+    if user_id is not None:
+        user_id = int(user_id)
 
     now = iso_now(CFG.tzinfo())
     if cashless > 0:
@@ -1535,42 +1429,9 @@ def upsert_service_cashless(
     return int(service_id)
 
 
-def register_bot_subscriber(telegram_id: int) -> None:
-    now = iso_now(CFG.tzinfo())
-    existing = db_fetchone("SELECT * FROM bot_subscribers WHERE telegram_id=?;", (telegram_id,))
-    if not existing:
-        db_exec(
-            """
-            INSERT INTO bot_subscribers (telegram_id, active, created_at, updated_at)
-            VALUES (?, 1, ?, ?);
-            """,
-            (telegram_id, now, now),
-        )
-        return
-    db_exec(
-        """
-        UPDATE bot_subscribers SET active=1, updated_at=?
-        WHERE telegram_id=?;
-        """,
-        (now, telegram_id),
-    )
-
 def list_report_recipients(settings_row: Optional[sqlite3.Row] = None) -> List[int]:
-    s = settings_row or get_settings()
-    ids: set[int] = set()
-    chat_id = s["report_chat_id"]
-    if chat_id:
-        ids.add(int(chat_id))
-    rows = db_fetchall(
-        """
-        SELECT b.telegram_id
-        FROM bot_subscribers b
-        JOIN users u ON u.telegram_id=b.telegram_id
-        WHERE b.active=1 AND u.is_active=1;
-        """
-    )
-    ids.update(int(r["telegram_id"]) for r in rows)
-    return sorted(ids)
+    rows = db_fetchall("SELECT id FROM users WHERE role IN ('admin','owner') AND is_active=1;")
+    return sorted(int(r["id"]) for r in rows)
 # ---------------------------
 # Session token (HMAC signed JSON) - self-contained (no external JWT deps)
 # ---------------------------
@@ -1941,14 +1802,14 @@ def compute_month_summary(
         closed_by_id = m["closed_by_user_id"]
         if closed_by_id:
             row = db_fetchone(
-                "SELECT id, telegram_id, name FROM users WHERE id=?;",
+                "SELECT id, name, login FROM users WHERE id=?;",
                 (int(closed_by_id),),
             )
             if row:
                 closed_by = {
                     "id": int(row["id"]),
-                    "telegram_id": int(row["telegram_id"]),
                     "name": row["name"],
+                    "login": row["login"],
                 }
 
     subaccounts: Dict[str, Dict[str, float]] = {}
@@ -2419,6 +2280,7 @@ class AdminUserCreateIn(BaseModel):
     team: Optional[str] = None
     cash_scopes: Optional[str] = None
     cash_ops: Optional[str] = None
+    email: Optional[str] = None
 
 
 class AdminUserUpdateIn(BaseModel):
@@ -2428,16 +2290,13 @@ class AdminUserUpdateIn(BaseModel):
     team: Optional[str] = None
     cash_scopes: Optional[str] = None
     cash_ops: Optional[str] = None
+    email: Optional[str] = None
 
 
 class AdminResetPasswordIn(BaseModel):
     password: str
 
 
-
-class MagicCreateIn(BaseModel):
-    telegram_id: int
-    target_app: str
 
 def is_user_active_row(row: sqlite3.Row) -> bool:
     keys = set(row.keys())
@@ -2450,91 +2309,18 @@ def is_user_active_row(row: sqlite3.Row) -> bool:
     return True
 
 
-def get_user_by_telegram_id(telegram_id: int, request: Optional[Request]) -> sqlite3.Row:
-    login = f"tg_{telegram_id}"
-
-    row = db_fetchone("SELECT * FROM users WHERE telegram_id=?;", (int(telegram_id),))
-    if not row:
-        log_auth_event("telegram", login, request, "fail", "not_found")
-        raise HTTPException(status_code=403, detail="user_not_found")
-    if not is_user_active_row(row):
-        log_auth_event("telegram", login, request, "fail", "inactive")
-        raise HTTPException(status_code=403, detail="user_inactive")
-    return row
-
-
 def get_bearer_token(request: Request) -> str:
-    h = request.headers.get("Authorization", "").strip()
-    if not h.lower().startswith("bearer "):
-        auth_log("bearer_missing", request)
-        raise HTTPException(status_code=401, detail="Missing Authorization Bearer token")
-    token = h.split(" ", 1)[1].strip()
-    auth_log("bearer_from_header", request, token=_mask_value(token))
-    return token
-
-
-def clamp_magic_ttl(value: int) -> int:
-    return max(60, min(180, int(value)))
-
-
-def mask_token(token: str) -> str:
-    if not token:
-        return "****"
-    if len(token) <= 8:
-        return "****"
-    return f"{token[:4]}****{token[-4:]}"
-
-
-def hash_magic_token(token: str) -> str:
-    secret = CFG.MAGIC_LINK_SECRET or CFG.SESSION_SECRET
-    return hmac.new(secret.encode("utf-8"), token.encode("utf-8"), hashlib.sha256).hexdigest()
-
-
-def get_magic_login_token(request: Request) -> str:
     h = request.headers.get("Authorization", "").strip()
     if h.lower().startswith("bearer "):
         token = h.split(" ", 1)[1].strip()
-        auth_log("magic_from_header", request, token=_mask_value(token))
+        auth_log("bearer_from_header", request, token=_mask_value(token))
         return token
-    token = request.query_params.get("token", "").strip()
-    if token:
-        auth_log("magic_from_query", request, token=_mask_value(token))
-        return token
-    auth_log("magic_missing", request)
-    raise HTTPException(status_code=401, detail="invalid_token")
-
-
-def get_magic_target_roles(target_app: str) -> Tuple[str, ...]:
-    target = (target_app or "").strip().lower()
-    if target == "webapp":
-        return ("owner", "admin", "viewer")
-    if target == "cashapp":
-        return ("owner", "admin", "cash_signer")
-    raise HTTPException(status_code=400, detail="invalid_target_app")
-
-
-def build_magic_link_url(target_app: str) -> Optional[str]:
-    target = (target_app or "").strip().lower()
-    if target == "cashapp":
-        url = cashapp_webapp_url()
-        if url:
-            return url
-        return f"{CFG.APP_URL.rstrip('/')}/cashapp"
-    if target == "webapp":
-        url = build_webapp_url()
-        if url:
-            return url
-        return CFG.WEBAPP_URL or f"{CFG.APP_URL.rstrip('/')}/webapp"
-    return None
-
-
-def append_magic_token(url: str, token: str) -> str:
-    parsed = urllib.parse.urlparse(url)
-    query = urllib.parse.parse_qs(parsed.query)
-    query["token"] = [token]
-    new_query = urllib.parse.urlencode(query, doseq=True)
-    return urllib.parse.urlunparse(parsed._replace(query=new_query))
-
+    cookie_token = request.cookies.get("session", "").strip()
+    if cookie_token:
+        auth_log("bearer_from_cookie", request, token=_mask_value(cookie_token))
+        return cookie_token
+    auth_log("bearer_missing", request)
+    raise HTTPException(status_code=401, detail="Missing session token")
 
 
 def get_current_user(request: Request) -> sqlite3.Row:
@@ -2567,7 +2353,7 @@ def admin_exists() -> bool:
     return bool(row)
 
 def has_registered_web_users() -> bool:
-    row = db_fetchone("SELECT id FROM users WHERE login NOT LIKE 'tg_%' LIMIT 1;")
+    row = db_fetchone("SELECT id FROM users LIMIT 1;")
     return bool(row)
 
 def create_user(
@@ -2577,6 +2363,7 @@ def create_user(
     role: str,
     name: Optional[str] = None,
     team: Optional[str] = None,
+    email: Optional[str] = None,
 ) -> sqlite3.Row:
     allowed_roles = {"admin", "viewer", "cash_signer"}
     if role not in allowed_roles:
@@ -2587,20 +2374,20 @@ def create_user(
     validate_login(login_norm)
     validate_password(password)
     password_hash = hash_password(password)
-    telegram_id = next_virtual_telegram_id()
     try:
         user_id = db_exec_returning_id(
             """
-            INSERT INTO users (telegram_id, login, password_hash, name, team, role, is_active, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?);
+            INSERT INTO users (login, password_hash, name, team, role, email, is_active, created_at, updated_at, password_changed_at)
+            VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?);
             """,
             (
-                int(telegram_id),
                 login_norm,
                 password_hash,
                 (name or "").strip() or None,
                 (team or "").strip() or None,
                 role,
+                (email or "").strip() or None,
+                now,
                 now,
                 now,
             ),
@@ -2628,118 +2415,39 @@ def make_auth_response(row: sqlite3.Row) -> Dict[str, Any]:
         "token": token,
         "user": {
             "id": row["id"],
-            "telegram_id": row["telegram_id"],
-            "username": row["username"],
-            "first_name": row["first_name"],
-            "last_name": row["last_name"],
             "login": row["login"],
             "name": row["name"],
             "team": row["team"],
             "role": row["role"],
+            "email": row["email"],
         },
     }
 
-def create_magic_login_token(
-    *,
-    telegram_id: int,
-    target_app: str,
-    request: Optional[Request],
-) -> Tuple[str, int]:
-    target_roles = get_magic_target_roles(target_app)
-    row = get_user_by_telegram_id(int(telegram_id), request)
-    role = str(row["role"])
-    if role not in target_roles:
-        log_auth_event("magic_create", f"tg_{telegram_id}", request, "fail", "insufficient_role")
-        raise HTTPException(status_code=403, detail="insufficient_role")
 
-    ttl = clamp_magic_ttl(CFG.MAGIC_LINK_TTL)
-    tz = CFG.tzinfo()
-    now = iso_now(tz)
-    expires_at = (dt.datetime.now(tz) + dt.timedelta(seconds=ttl)).isoformat()
-    token = secrets.token_urlsafe(24)
-    token_hash = hash_magic_token(token)
-    created_ip = request.client.host if request and request.client else None
-    ua = request.headers.get("user-agent") if request else None
-
-    for _ in range(3):
-        try:
-            db_exec(
-                """
-                INSERT INTO magic_links (
-                    token_hash, user_id, telegram_id, target_app,
-                    expires_at, used_at, created_at, created_ip, ua
-                )
-                VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?);
-                """,
-                (
-                    token_hash,
-                    int(row["id"]),
-                    int(telegram_id),
-                    target_app,
-                    expires_at,
-                    now,
-                    created_ip,
-                    ua,
-                ),
-            )
-            log_auth_event(
-                "magic_create",
-                f"tg_{telegram_id}",
-                request,
-                "success",
-                detail=f"token={mask_token(token)}",
-                user_id=int(row["id"]),
-            )
-            return token, ttl
-        except sqlite3.IntegrityError:
-            token = secrets.token_urlsafe(24)
-            token_hash = hash_magic_token(token)
-
-    log_auth_event("magic_create", f"tg_{telegram_id}", request, "fail", "token_collision")
-    raise HTTPException(status_code=500, detail="token_generation_failed")
+def _cookie_secure() -> bool:
+    return CFG.APP_URL.lower().startswith("https://")
 
 
-def exchange_magic_login_token(login_token: str, request: Optional[Request]) -> Dict[str, Any]:
-    token_hash = hash_magic_token(login_token)
-    row = db_fetchone("SELECT * FROM magic_links WHERE token_hash=?;", (token_hash,))
-    if not row:
-        log_auth_event("magic_exchange", "unknown", request, "fail", "invalid_token")
-        raise HTTPException(status_code=401, detail="invalid_token")
-    if row["used_at"]:
-        log_auth_event("magic_exchange", "unknown", request, "fail", "used_token")
-        raise HTTPException(status_code=401, detail="used_token")
-    expires_at = row["expires_at"]
-    try:
-        expires_dt = dt.datetime.fromisoformat(str(expires_at))
-    except Exception:
-        expires_dt = dt.datetime.min.replace(tzinfo=CFG.tzinfo())
-    if dt.datetime.now(CFG.tzinfo()) > expires_dt:
-        log_auth_event("magic_exchange", "unknown", request, "fail", "expired_token")
-        raise HTTPException(status_code=401, detail="expired_token")
-
-    user = db_fetchone("SELECT * FROM users WHERE id=?;", (int(row["user_id"]),))
-    if not user or not is_user_active_row(user):
-        log_auth_event("magic_exchange", "unknown", request, "fail", "user_inactive")
-        raise HTTPException(status_code=403, detail="user_inactive")
-
-    target_roles = get_magic_target_roles(str(row["target_app"]))
-    if str(user["role"]) not in target_roles:
-        log_auth_event("magic_exchange", "unknown", request, "fail", "insufficient_role")
-        raise HTTPException(status_code=403, detail="insufficient_role")
-
-    now = iso_now(CFG.tzinfo())
-    db_exec("UPDATE magic_links SET used_at=? WHERE id=?;", (now, int(row["id"])))
-    log_auth_event(
-        "magic_exchange",
-        f"tg_{user['telegram_id']}",
-        request,
-        "success",
-        detail=f"token={mask_token(login_token)}",
-        user_id=int(user["id"]),
+def set_session_cookies(response: Response, token: str) -> str:
+    max_age = 7 * 24 * 3600
+    csrf_token = secrets.token_urlsafe(16)
+    response.set_cookie(
+        "session",
+        token,
+        httponly=True,
+        secure=_cookie_secure(),
+        samesite="lax",
+        max_age=max_age,
     )
-    return make_auth_response(user)
-
-
+    response.set_cookie(
+        "csrf_token",
+        csrf_token,
+        httponly=False,
+        secure=_cookie_secure(),
+        samesite="lax",
+        max_age=max_age,
+    )
+    return csrf_token
 
 def require_role(*allowed_roles: str):
     def _dep(u: sqlite3.Row = Depends(get_current_user)) -> sqlite3.Row:
@@ -2776,23 +2484,13 @@ def log_auth_event(
     level = "INFO" if status == "success" else "WARNING"
     message = f"Auth {event} {status}"
     try:
+        AUTH_LOG.log(getattr(logging, level, logging.INFO), "%s | %s", message, json.dumps(details, ensure_ascii=False))
+    except Exception:
+        pass
+    try:
         log_system_log(level, "auth", message, details=details)
     except Exception:
         pass
-
-def require_magic_create_secret(request: Request) -> None:
-    expected = CFG.MAGIC_LINK_SECRET
-    if not expected:
-        raise HTTPException(status_code=500, detail="magic_secret_not_configured")
-    provided = (
-        request.headers.get("x-magic-secret")
-        or request.headers.get("x-api-key")
-        or ""
-    ).strip()
-    if not provided or not hmac.compare_digest(provided, expected):
-        raise HTTPException(status_code=401, detail="invalid_magic_secret")
-
-
 
 # ---------------------------
 # API Models (requests)
@@ -2873,600 +2571,22 @@ class CategoryRenameMassIn(BaseModel):
 
 
 # ---------------------------
-# Telegram Bot (aiogram)
+# Notifications / reports (in-app)
 # ---------------------------
-
-bot: Optional[Bot] = None
-dp: Optional[Dispatcher] = None
-router = Router()
-
-# Pending confirmations (in-memory)
-PENDING: Dict[int, Dict[str, Any]] = {}  # telegram_id -> payload
-
-
-def is_allowed_telegram_user(telegram_id: int) -> bool:
-    row = db_fetchone("SELECT * FROM users WHERE telegram_id=?;", (int(telegram_id),))
-    if not row:
-        return False
-    return is_user_active_row(row)
-
-
-def get_user_role_from_db(telegram_id: int) -> str:
-    row = db_fetchone("SELECT * FROM users WHERE telegram_id=?;", (telegram_id,))
-    if not row or not is_user_active_row(row):
-        return "none"
-    return str(row["role"])
-
-
-def main_menu_kb(role: str) -> ReplyKeyboardMarkup:
-    placeholder = "Выберите действие"
-
-
-    normalized_role = (role or "").strip()
-    buttons: List[List[KeyboardButton]] = []
-    if normalized_role == "cash_signer":
-        cashapp_url = cashapp_webapp_url()
-        if cashapp_url:
-            buttons.append([KeyboardButton(text="Подписать наличные", web_app=WebAppInfo(url=cashapp_url))])
-    else:
-        webapp_url = build_webapp_url()
-        if webapp_url:
-            buttons.append([KeyboardButton(text="Открыть дашборд", web_app=WebAppInfo(url=webapp_url))])
-    return ReplyKeyboardMarkup(
-        keyboard=buttons,
-        resize_keyboard=True,
-        is_persistent=True,
-        input_field_placeholder=placeholder,
-    )
-
-
-def confirm_kb(kind: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ Сохранить", callback_data=f"confirm:save:{kind}"),
-                InlineKeyboardButton(text="❌ Отмена", callback_data=f"confirm:cancel:{kind}"),
-            ]
-        ]
-    )
-
-
-def reports_kb() -> InlineKeyboardMarkup:
-    webapp_url = build_webapp_url()
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Отчёт за текущее воскресенье", callback_data="report:sunday")],
-            [InlineKeyboardButton(text="Расходы за текущий месяц", callback_data="report:month_expenses")],
-            [InlineKeyboardButton(text="Итоги месяца", callback_data="report:month_summary")],
-            *(
-                [[InlineKeyboardButton(text="Открыть дашборд", web_app=WebAppInfo(url=webapp_url))]]
-                if webapp_url
-                else []
-            ),
-        ]
-    )
-
-def webapp_url_with_screen(screen: str) -> Optional[str]:
-    return build_webapp_url(screen)
-
-def parse_quick_input(text: str) -> Optional[Dict[str, Any]]:
-    """
-    Форматы из ТЗ:
-      "пож 8500 4800"   -> cashless=8500, cash=4800
-      "расход 2500 зал" -> unit_amount=2500, category="зал", title="зал"
-    """
-    t = text.strip()
-    low = t.lower()
-
-    if low.startswith("пож"):
-        parts = t.split()
-        if len(parts) < 2:
-            return None
-        cashless = float(parts[1].replace(",", "."))
-        cash = float(parts[2].replace(",", ".")) if len(parts) >= 3 else 0.0
-        return {"kind": "donation", "cashless": cashless, "cash": cash}
-
-    if low.startswith("расход"):
-        parts = t.split()
-        if len(parts) < 2:
-            return None
-        amount = float(parts[1].replace(",", "."))
-        tail = " ".join(parts[2:]).strip() if len(parts) >= 3 else "Прочее"
-        category = tail if tail else "Прочее"
-        title = tail if tail else "Расход"
-        return {"kind": "expense", "unit_amount": amount, "category": category, "title": title}
-
-    return None
-
-
-def last_sunday(today: dt.date) -> dt.date:
-    # Sunday is weekday=6
-    delta = (today.weekday() - 6) % 7
-    return today - dt.timedelta(days=delta)
-
-
-def format_telegram_exception(exc: Exception) -> str:
-    msg = str(exc)
-    lower = msg.lower()
-    hint = ""
-    if "chat not found" in lower:
-        hint = "Чат не найден. Проверьте chat_id и добавьте бота в чат/канал или нажмите /start."
-    elif "bot was blocked by the user" in lower:
-        hint = "Бот заблокирован пользователем. Нужно разблокировать и снова нажать /start."
-    elif "not enough rights" in lower or "administrator rights" in lower:
-        hint = "У бота нет прав в чате. Проверьте, что бот добавлен и имеет доступ к отправке сообщений."
-    return f"{msg}. {hint}".strip()
-
-
-async def bot_send_safe(
-    chat_id: int,
-    text: str,
-    reply_markup: Optional[InlineKeyboardMarkup] = None,
-) -> Tuple[bool, Optional[str]]:
-    if not bot:
-        return False, "Bot is not initialized"
-    try:
-        await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
-        return True, None
-    except Exception as exc:
-        # avoid crashing scheduler/bot
-        msg = format_telegram_exception(exc)
-        print("Failed to send message:", msg)
-        return False, msg
-
-
-async def bot_send_or_http_error(
-    chat_id: int,
-    text: str,
-    reply_markup: Optional[InlineKeyboardMarkup] = None,
-) -> None:
-    if not bot:
-        raise HTTPException(status_code=503, detail="Bot is not initialized")
-    try:
-        await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
-    except TelegramForbiddenError as exc:
-        raise HTTPException(status_code=403, detail=format_telegram_exception(exc))
-    except TelegramBadRequest as exc:
-        raise HTTPException(status_code=400, detail=format_telegram_exception(exc))
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=format_telegram_exception(exc))
-
-
-async def ensure_report_chat_reachable(chat_id: int) -> None:
-    if not bot:
-        raise HTTPException(status_code=503, detail="Bot is not initialized")
-    try:
-        await bot.get_chat(chat_id)
-    except TelegramForbiddenError as exc:
-        raise HTTPException(status_code=403, detail=format_telegram_exception(exc))
-    except TelegramBadRequest as exc:
-        raise HTTPException(status_code=400, detail=format_telegram_exception(exc))
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=format_telegram_exception(exc))
 
 
 async def send_report_to_recipients(
-        text: str,
-        reply_markup: Optional[InlineKeyboardMarkup],
-        recipients: List[int],
-        raise_on_error: bool,
-        kind: str = "report",
+    text: str,
+    recipients: List[int],
+    raise_on_error: bool,
+    kind: str = "report",
 ) -> None:
     if not recipients:
         if raise_on_error:
             raise HTTPException(status_code=400, detail="No report recipients configured")
         return
-    errors: List[str] = []
-    for chat_id in recipients:
-        safe_markup = reply_markup if is_allowed_telegram_user(chat_id) else None
-        try:
-            if raise_on_error:
-                await bot_send_or_http_error(chat_id, text, safe_markup)
-                log_message_delivery(kind, chat_id, "success", None)
-            else:
-                await bot_send_safe(chat_id, text, safe_markup)
-                ok, err = await bot_send_safe(chat_id, text, safe_markup)
-                if ok:
-                    log_message_delivery(kind, chat_id, "success", None)
-                else:
-                    log_message_delivery(kind, chat_id, "fail", err)
-        except HTTPException as exc:
-            log_message_delivery(kind, chat_id, "fail", str(exc.detail))
-            errors.append(f"{chat_id}: {exc.detail}")
-    if errors and raise_on_error:
-        raise HTTPException(status_code=502, detail="; ".join(errors))
-
-
-@router.message(Command("start"))
-async def on_start(m: Message):
-    tid = m.from_user.id if m.from_user else 0
-    if not tid or not is_allowed_telegram_user(tid):
-        await m.answer(
-            "Доступ запрещён.\n"
-            f"Ваш Telegram ID: {tid}\n"
-            "Обратитесь к администратору для добавления в систему."
-        )
-        return
-    if tid:
-        register_bot_subscriber(tid)
-
-
-    role = get_user_role_from_db(tid)
-    await m.answer(
-        "Для входа в систему откройте дашборд через кнопку ниже.",
-        reply_markup=main_menu_kb(role),
-    )
-    webapp_url = build_webapp_url()
-    if not webapp_url:
-        await m.answer(
-            "Внимание: WebApp-кнопки доступны только по HTTPS.\n"
-            "Настройте публичный HTTPS-домен и задайте APP_URL/WEBAPP_URL в .env."
-        )
-
-
-@router.message(F.text)
-async def on_text(m: Message):
-    if not m.from_user or not m.text:
-        return
-    tid = m.from_user.id
-    if not is_allowed_telegram_user(tid):
-        return
-
-    text = m.text.strip()
-    role = get_user_role_from_db(tid)
-    if text == "Быстрый ввод пожертвования":
-        if role not in ("admin"):
-            await m.answer("Нет доступа")
-            return
-        await m.answer("Отправьте сообщением: `пож 8500 4800` (безнал нал)", parse_mode="Markdown")
-        return
-    if text == "Быстрый ввод расхода":
-        if role not in ("admin"):
-            await m.answer("Нет доступа")
-            return
-        await m.answer("Отправьте сообщением: `расход 2500 зал`", parse_mode="Markdown")
-        return
-    if text == "Отчёты":
-        if role not in ("admin"):
-            await m.answer("Нет доступа")
-            return
-        await m.answer("Отчёты:", reply_markup=reports_kb())
-        return
-    if text == "Настройки":
-        if role != "admin":
-            await m.answer("Нет доступа")
-            return
-        settings_url = webapp_url_with_screen("settings")
-        inline_keyboard = []
-        if settings_url:
-            inline_keyboard.append(
-                [InlineKeyboardButton(text="Открыть настройки (WebApp)", web_app=WebAppInfo(url=settings_url))]
-            )
-        await m.answer(
-            "Настройки:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=inline_keyboard),
-        )
-        return
-
-
-
-    parsed = parse_quick_input(m.text)
-    if not parsed:
-        return
-
-    tz = CFG.tzinfo()
-    today = dt.datetime.now(tz).date()
-
-    if parsed["kind"] == "donation":
-        s_date = last_sunday(today)
-        PENDING[tid] = {
-            "kind": "donation",
-            "service_date": s_date.isoformat(),
-            "cashless": float(parsed["cashless"]),
-            "cash": float(parsed["cash"]),
-        }
-        await m.answer(
-            f"Проверить пожертвование:\n"
-            f"Дата: {s_date.strftime('%d.%m.%Y')}\n"
-            f"Безнал: {parsed['cashless']:.2f}\n"
-            f"Наличные: {parsed['cash']:.2f}\n"
-            f"Итого: {(parsed['cashless']+parsed['cash']):.2f}",
-            reply_markup=confirm_kb("donation"),
-        )
-        return
-
-    if parsed["kind"] == "expense":
-        e_date = today
-        PENDING[tid] = {
-            "kind": "expense",
-            "expense_date": e_date.isoformat(),
-            "category": parsed["category"],
-            "title": parsed["title"],
-            "qty": 1.0,
-            "unit_amount": float(parsed["unit_amount"]),
-            "comment": None,
-        }
-        await m.answer(
-            f"Проверить расход:\n"
-            f"Дата: {e_date.strftime('%d.%m.%Y')}\n"
-            f"Категория: {parsed['category']}\n"
-            f"Название: {parsed['title']}\n"
-            f"Сумма: {parsed['unit_amount']:.2f}",
-            reply_markup=confirm_kb("expense"),
-        )
-        return
-
-
-@router.callback_query(F.data.startswith("quick:"))
-async def on_quick(cq: CallbackQuery):
-    if not cq.from_user:
-        return
-    tid = cq.from_user.id
-    if not is_allowed_telegram_user(tid):
-        await cq.answer("Нет доступа", show_alert=True)
-        return
-
-    kind = cq.data.split(":", 1)[1]
-    if kind == "donation":
-        await cq.message.answer("Отправьте сообщением: `пож 8500 4800` (безнал нал)", parse_mode="Markdown")
-        await cq.answer()
-        return
-    if kind == "expense":
-        await cq.message.answer("Отправьте сообщением: `расход 2500 зал`", parse_mode="Markdown")
-        await cq.answer()
-        return
-
-    await cq.answer()
-
-
-@router.callback_query(F.data.startswith("menu:reports"))
-async def on_reports_menu(cq: CallbackQuery):
-    if not cq.from_user:
-        return
-    tid = cq.from_user.id
-    if not is_allowed_telegram_user(tid):
-        await cq.answer("Нет доступа", show_alert=True)
-        return
-        await cq.message.answer("Отчёты:", reply_markup=reports_kb())
-        await cq.answer()
-
-    @router.callback_query(F.data.startswith("menu:settings"))
-    async def on_settings_menu(cq: CallbackQuery):
-        if not cq.from_user:
-            return
-        tid = cq.from_user.id
-        if not is_allowed_telegram_user(tid):
-            await cq.answer("Нет доступа", show_alert=True)
-            return
-
-        role = get_user_role_from_db(tid)
-        if role != "admin":
-            await cq.answer("Нет доступа", show_alert=True)
-            return
-
-        settings_url = webapp_url_with_screen("settings")
-        inline_keyboard = []
-        if settings_url:
-            inline_keyboard.append(
-                [InlineKeyboardButton(text="Открыть настройки (WebApp)",
-                                      web_app=WebAppInfo(url=settings_url))]
-            )
-        await cq.message.answer(
-            "Настройки:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=inline_keyboard),
-        )
-        await cq.answer()
-
-    @router.callback_query(F.data.startswith("report:"))
-    async def on_report_actions(cq: CallbackQuery):
-        if not cq.from_user:
-            return
-        tid = cq.from_user.id
-        if not is_allowed_telegram_user(tid):
-            await cq.answer("Нет доступа", show_alert=True)
-            return
-
-
-    role = get_user_role_from_db(tid)
-    if role not in ("admin", "viewer"):
-        await cq.answer("Нет роли", show_alert=True)
-        return
-
-    tz = CFG.tzinfo()
-    today = dt.datetime.now(tz).date()
-    action = cq.data.split(":", 1)[1]
-
-    if action == "sunday":
-        text, kb = build_sunday_report_text(today)
-        await cq.message.answer(text, reply_markup=kb)
-        await cq.answer()
-        return
-
-    if action == "month_expenses":
-        text, kb = build_month_expenses_report_text(today)
-        await cq.message.answer(text, reply_markup=kb)
-        await cq.answer()
-        return
-
-    if action == "month_summary":
-        m = get_or_create_month(today.year, today.month)
-        summary = compute_month_summary(int(m["id"]), ensure_tithe=True)
-        text = format_month_summary_text(summary)
-        webapp_url = build_webapp_url()
-        inline_keyboard = []
-        if webapp_url:
-            inline_keyboard.append([InlineKeyboardButton(text="Открыть дашборд", web_app=WebAppInfo(url=webapp_url))])
-        await cq.message.answer(text, reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=inline_keyboard
-        ))
-        await cq.answer()
-        return
-
-    await cq.answer()
-
-
-@router.callback_query(F.data.startswith("confirm:"))
-async def on_confirm(cq: CallbackQuery):
-    if not cq.from_user:
-        return
-    tid = cq.from_user.id
-    if not is_allowed_telegram_user(tid):
-        await cq.answer("Нет доступа", show_alert=True)
-        return
-
-    parts = cq.data.split(":")
-    if len(parts) < 3:
-        await cq.answer()
-        return
-    action = parts[1]  # save / cancel
-    kind = parts[2]
-
-    pending = PENDING.get(tid)
-    if not pending or pending.get("kind") != kind:
-        await cq.answer("Нет данных для сохранения", show_alert=True)
-        return
-
-    if action == "cancel":
-        PENDING.pop(tid, None)
-        await cq.message.answer("Отменено.")
-        await cq.answer()
-        return
-
-    # save
-    user_row = db_fetchone("SELECT * FROM users WHERE telegram_id=?;", (tid,))
-    if not user_row or not is_user_active_row(user_row):
-        await cq.answer("Пользователь не активен", show_alert=True)
-        return
-    user_id = int(user_row["id"])
-    role = str(user_row["role"])
-    if role not in ("admin",):
-        await cq.answer("Недостаточно прав для сохранения", show_alert=True)
-        return
-
-    tz = CFG.tzinfo()
-    now = iso_now(tz)
-
-    if kind == "donation":
-        s_date = parse_iso_date(pending["service_date"])
-        m = get_or_create_month(s_date.year, s_date.month)
-        month_id = int(m["id"])
-
-        before = db_fetchone(
-            """
-            SELECT * FROM services
-            WHERE month_id=? AND service_date=? AND account='main' AND income_type='donation';
-            """,
-            (month_id, pending["service_date"]),
-        )
-        cashless = float(pending["cashless"])
-        cash = float(pending["cash"])
-        total = round(cashless + cash, 2)
-        if cash > 0:
-            request_id = create_cashflow_collect_request_if_needed(
-                account="main",
-                cash_amount=cash,
-                cashless_amount=cashless,
-                income_type="donation",
-                month_id=month_id,
-                service_date=pending["service_date"],
-                created_by_telegram_id=int(tid),
-            )
-            if request_id:
-                notify_payload = build_cashflow_signer_notification(request_id)
-                if notify_payload:
-                    import cashflow_bot as cfb
-
-                    await cfb.notify_signers_new_request(
-                        **notify_payload,
-                        is_retry=False,
-                        admin_comment=None,
-                    )
-                PENDING.pop(tid, None)
-                await cq.message.answer(
-                    f"Создан запрос на подтверждение наличных №{request_id}. "
-                    "Внесение возможно после подписей."
-                )
-                await cq.answer()
-                return
-
-        # upsert service
-        if before:
-            db_exec(
-                """
-                UPDATE services
-                SET cashless=?, cash=?, total=?, account='main', updated_at=?
-                WHERE id=?;
-                """,
-                (cashless, cash, total, now, before["id"]),
-            )
-            after = db_fetchone("SELECT * FROM services WHERE id=?;", (before["id"],))
-            log_audit(user_id, "UPDATE", "service", int(before["id"]), dict(before), dict(after) if after else None)
-        else:
-            new_id = db_exec_returning_id(
-                """
-                INSERT INTO services (
-                    month_id, service_date, idx, cashless, cash, total,
-                    weekly_min_needed, mnsps_status, pvs_ratio,
-                    created_at, updated_at
-                ) VALUES (?, ?, 1, ?, ?, ?, 0, 'Не собрана', 0, 'main', 'donation', ?, ?);
-                """,
-                (month_id, pending["service_date"], cashless, cash, total, now, now),
-            )
-            after = db_fetchone("SELECT * FROM services WHERE id=?;", (new_id,))
-            log_audit(user_id, "CREATE", "service", int(new_id), None, dict(after) if after else None)
-
-        # Recalc + tithe
-        recalc_services_for_month(month_id)
-        ensure_tithe_expense(month_id, user_id=user_id)
-
-        PENDING.pop(tid, None)
-        await cq.message.answer("✅ Пожертвование сохранено.")
-        await cq.answer()
-        return
-
-    if kind == "expense":
-        e_date = parse_iso_date(pending["expense_date"])
-        m = get_or_create_month(e_date.year, e_date.month)
-        month_id = int(m["id"])
-        category = resolve_category(pending["category"], role, user_id)
-
-        new_id = db_exec_returning_id(
-            """
-            INSERT INTO expenses (
-                month_id, expense_date, category, title, qty, unit_amount, total, comment,
-                is_system, account, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 'main', ?, ?);
-            """,
-            (
-                month_id,
-                pending["expense_date"],
-                category,
-                pending["title"],
-                float(pending.get("qty", 1.0)),
-                float(pending["unit_amount"]),
-                round(float(pending.get("qty", 1.0)) * float(pending["unit_amount"]), 2),
-                pending.get("comment"),
-                now,
-                now,
-            ),
-        )
-        after = db_fetchone("SELECT * FROM expenses WHERE id=?;", (new_id,))
-        log_audit(user_id, "CREATE", "expense", int(new_id), None, dict(after) if after else None)
-
-        # expenses changed -> recompute summary (tithe depends on income, но пусть живёт; ensure anyway)
-        ensure_tithe_expense(month_id, user_id=user_id)
-
-        PENDING.pop(tid, None)
-        await cq.message.answer("✅ Расход сохранён.")
-        await cq.answer()
-        return
-
-    await cq.answer()
-
-
-# ---------------------------
-# Report builders (Telegram text)
-# ---------------------------
+    from notifications_service import notify_users
+    notify_users(recipients, event_type=kind, payload={"message": text})
 
 def fmt_money(x: float) -> str:
     # 41 502.16 style
@@ -3479,7 +2599,7 @@ def fmt_percent_1(x: float) -> str:
     return f"{x * 100:.1f}%"
 
 
-def build_sunday_report_text(today: dt.date) -> Tuple[str, InlineKeyboardMarkup]:
+def build_sunday_report_text(today: dt.date) -> str:
     tz = CFG.tzinfo()
     s_date = last_sunday(today)
     m = get_or_create_month(s_date.year, s_date.month)
@@ -3527,18 +2647,10 @@ def build_sunday_report_text(today: dt.date) -> Tuple[str, InlineKeyboardMarkup]
         f"• СДДР: <b>{sddr_text}</b>"
     )
 
-    webapp_url = build_webapp_url()
-    inline_keyboard = []
-    if webapp_url:
-        inline_keyboard.append([InlineKeyboardButton(text="Открыть дашборд", web_app=WebAppInfo(url=webapp_url))])
-    inline_keyboard.append([InlineKeyboardButton(text="Добавить расход", callback_data="quick:expense")])
-    if webapp_url:
-        inline_keyboard.append([InlineKeyboardButton(text="История месяца", web_app=WebAppInfo(url=webapp_url))])
-    kb = InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
-    return title + block1 + block2 + block3, kb
+    return title + block1 + block2 + block3
 
 
-def build_month_expenses_report_text(today: dt.date) -> Tuple[str, InlineKeyboardMarkup]:
+def build_month_expenses_report_text(today: dt.date) -> str:
     m = get_or_create_month(today.year, today.month)
     month_id = int(m["id"])
 
@@ -3587,13 +2699,7 @@ def build_month_expenses_report_text(today: dt.date) -> Tuple[str, InlineKeyboar
         f"• Факт. баланс: <b>{fmt_money(float(summary['fact_balance']))}</b>"
     )
 
-    webapp_url = build_webapp_url()
-    inline_keyboard = []
-    if webapp_url:
-        inline_keyboard.append([InlineKeyboardButton(text="Открыть дашборд", web_app=WebAppInfo(url=webapp_url))])
-    inline_keyboard.append([InlineKeyboardButton(text="Добавить расход", callback_data="quick:expense")])
-    kb = InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
-    return title + body, kb
+    return title + body
 
 
 def format_month_summary_text(summary: Dict[str, Any]) -> str:
@@ -3725,8 +2831,8 @@ async def run_sunday_report_job() -> None:
             return
         tzinfo = ZoneInfo(str(s["timezone"] or CFG.TZ))
         today = dt.datetime.now(tzinfo).date()
-        text, kb = build_sunday_report_text(today)
-        await send_report_to_recipients(text, kb, recipients, raise_on_error=False, kind="report")
+        text = build_sunday_report_text(today)
+        await send_report_to_recipients(text, recipients, raise_on_error=False, kind="report")
 
     await run_job_with_logging("sunday_report", _job())
 
@@ -3738,8 +2844,8 @@ async def run_daily_expenses_job() -> None:
             return
         tzinfo = ZoneInfo(str(s["timezone"] or CFG.TZ))
         today = dt.datetime.now(tzinfo).date()
-        text, kb = build_month_expenses_report_text(today)
-        await send_report_to_recipients(text, kb, recipients, raise_on_error=False, kind="report")
+        text = build_month_expenses_report_text(today)
+        await send_report_to_recipients(text, recipients, raise_on_error=False, kind="report")
 
     await run_job_with_logging("daily_expenses", _job())
 
@@ -3915,54 +3021,26 @@ async def lifespan(app: FastAPI):
     # init DB
     init_db()
 
-
-    # init bot + dp
-    global bot, dp
-    from aiogram.client.default import DefaultBotProperties
-
-    bot = Bot(
-        token=CFG.BOT_TOKEN,
-        default=DefaultBotProperties(parse_mode="HTML")
-    )
-    import cashflow_bot
-
-    cashflow_bot.set_bot(bot)
-
-
-    dp = Dispatcher()
-    dp.include_router(router)
-
     # scheduler
     if not scheduler.running:
         scheduler.start()
     reschedule_jobs()
 
-    # start polling as background task
-    polling_task = asyncio.create_task(dp.start_polling(bot))  # type: ignore[arg-type]
-
     try:
         yield
     finally:
-        try:
-            polling_task.cancel()
-        except Exception:
-            pass
-        try:
-            await bot.session.close()  # type: ignore[union-attr]
-        except Exception:
-            pass
         try:
             scheduler.shutdown(wait=False)
         except Exception:
             pass
 
 
-APP = FastAPI(title="Church Accounting Bot", version="1.0.0", lifespan=lifespan)
+APP = FastAPI(title="Church Accounting", version="1.0.0", lifespan=lifespan)
 app = APP
 
 APP.add_middleware(
     CORSMiddleware,
-    allow_origins=[CFG.APP_URL, CFG.WEBAPP_URL, "http://localhost", "http://localhost:8000", "*"],
+    allow_origins=[CFG.APP_URL],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -3981,14 +3059,21 @@ async def auth_debug_middleware(request: Request, call_next):
     request.state.rid = rid
 
     path = request.url.path
+    unsafe_method = request.method.upper() not in {"GET", "HEAD", "OPTIONS"}
+    if unsafe_method and path.startswith("/api/") and request.cookies.get("session"):
+        csrf_cookie = request.cookies.get("csrf_token")
+        csrf_header = request.headers.get("x-csrf-token")
+        if not csrf_cookie or not csrf_header or csrf_cookie != csrf_header:
+            return JSONResponse(status_code=403, content={"detail": "csrf_required"})
 
     # "Входные" логи — только важные точки, чтобы не шуметь
     watch_in = (
         path.startswith("/api/auth/")
         or path == "/api/me"
         or path == "/api/diag/log"
-        or path == "/webapp"
-        or path == "/cashapp"
+        or path == "/login"
+        or path == "/app"
+        or path == "/cash"
     )
 
     t0 = time.time()
@@ -4079,9 +3164,6 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 def health():
     return {"ok": True}
 
-from pydantic import BaseModel
-from typing import Any, Dict, Optional
-
 class DiagLogIn(BaseModel):
     event: str
     data: Dict[str, Any] = {}
@@ -4123,16 +3205,14 @@ async def diag_log(request: Request, body: DiagLogIn):
     return {"ok": True}
 
 
-# (опционально) отдача webapp.html
-@APP.get("/webapp")
+# (опционально) отдача webapp.html / cashapp.html
+@APP.get("/app")
 def webapp(request: Request):
     auth_log(
         "webapp_open",
         request,
-        token_qs=_mask_value(request.query_params.get("token", "")),
-        api_qs=str(request.query_params.get("api") or ""),
+        ua=request.headers.get("user-agent"),
     )
-
     path = os.path.join(os.path.dirname(__file__), "webapp.html")
     if not os.path.exists(path):
         return JSONResponse({"detail": "webapp.html not found"}, status_code=404)
@@ -4143,15 +3223,13 @@ def webapp(request: Request):
     )
 
 
-@APP.get("/cashapp")
+@APP.get("/cash")
 def cashapp(request: Request):
     auth_log(
         "cashapp_open",
         request,
-        token_qs=_mask_value(request.query_params.get("token", "")),
-        api_qs=str(request.query_params.get("api") or ""),
+        ua=request.headers.get("user-agent"),
     )
-
     path = os.path.join(os.path.dirname(__file__), "cashapp.html")
     if not os.path.exists(path):
         return JSONResponse({"detail": "cashapp.html not found"}, status_code=404)
@@ -4160,6 +3238,49 @@ def cashapp(request: Request):
         media_type="text/html",
         headers={"Cache-Control": "no-store, max-age=0, must-revalidate"},
     )
+
+
+@APP.get("/login")
+def login_page():
+    path = os.path.join(os.path.dirname(__file__), "login.html")
+    if not os.path.exists(path):
+        return JSONResponse({"detail": "login.html not found"}, status_code=404)
+    return FileResponse(
+        path,
+        media_type="text/html",
+        headers={"Cache-Control": "no-store, max-age=0, must-revalidate"},
+    )
+
+
+@APP.get("/admin/users")
+def admin_users_page():
+    return RedirectResponse(url="/app?screen=users", status_code=307)
+
+
+@APP.get("/403")
+def forbidden_page():
+    path = os.path.join(os.path.dirname(__file__), "403.html")
+    if not os.path.exists(path):
+        return JSONResponse({"detail": "403.html not found"}, status_code=404)
+    return FileResponse(path, media_type="text/html")
+
+
+@APP.get("/404")
+def not_found_page():
+    path = os.path.join(os.path.dirname(__file__), "404.html")
+    if not os.path.exists(path):
+        return JSONResponse({"detail": "404.html not found"}, status_code=404)
+    return FileResponse(path, media_type="text/html")
+
+
+@APP.get("/webapp")
+def legacy_webapp():
+    return RedirectResponse(url="/app", status_code=307)
+
+
+@APP.get("/cashapp")
+def legacy_cashapp():
+    return RedirectResponse(url="/cash", status_code=307)
 
 
 @APP.get("/favicon.ico")
@@ -4175,7 +3296,7 @@ def favicon():
 
 
 @APP.post("/api/auth/login", response_model=AuthOut)
-def auth_login(body: AuthLoginIn, request: Request):
+def auth_login(body: AuthLoginIn, request: Request, response: Response):
     login_norm = normalize_login(body.login)
     validate_login(login_norm)
     key = f"{request.client.host if request.client else 'unknown'}|{login_norm}"
@@ -4189,24 +3310,24 @@ def auth_login(body: AuthLoginIn, request: Request):
         log_auth_event("login", login_norm, request, "fail", "invalid_credentials")
         raise HTTPException(status_code=403, detail="invalid_credentials")
 
+    now = iso_now(CFG.tzinfo())
+    db_exec("UPDATE users SET last_login_at=? WHERE id=?;", (now, int(row["id"])))
     log_auth_event("login", login_norm, request, "success", user_id=int(row["id"]))
-    return make_auth_response(row)
+    auth = make_auth_response(row)
+    set_session_cookies(response, auth["token"])
+    return auth
+
+
+@APP.post("/api/auth/logout")
+def auth_logout(response: Response):
+    response.delete_cookie("session")
+    response.delete_cookie("csrf_token")
+    return {"status": "ok"}
 
 
 @APP.post("/api/auth/register", response_model=AuthOut, status_code=201)
-def auth_register(body: AuthRegisterIn, request: Request):
-    login_norm = normalize_login(body.login)
-    validate_login(login_norm)
-    validate_password(body.password)
-
-    row = create_user(
-        login=login_norm,
-        password=body.password,
-        role="viewer",
-        name=body.name,
-    )
-    log_auth_event("register", login_norm, request, "success", user_id=int(row["id"]))
-    return make_auth_response(row)
+def auth_register(body: AuthRegisterIn, request: Request, response: Response):
+    raise HTTPException(status_code=403, detail="registration_disabled")
 
 
 @APP.get("/api/auth/bootstrap/status")
@@ -4218,7 +3339,7 @@ def auth_bootstrap_status():
 
 
 @APP.post("/api/auth/bootstrap/create-admin", response_model=AuthOut)
-def auth_bootstrap_create_admin(body: AuthBootstrapIn, request: Request):
+def auth_bootstrap_create_admin(body: AuthBootstrapIn, request: Request, response: Response):
     if admin_exists():
         raise HTTPException(status_code=409, detail="admin_already_exists")
     secret = CFG.ADMIN_BOOTSTRAP_SECRET
@@ -4239,7 +3360,9 @@ def auth_bootstrap_create_admin(body: AuthBootstrapIn, request: Request):
         name=body.name,
     )
     log_auth_event("bootstrap_admin", login_norm, request, "success", user_id=int(row["id"]))
-    return make_auth_response(row)
+    auth = make_auth_response(row)
+    set_session_cookies(response, auth["token"])
+    return auth
 
 
 @APP.get("/api/me")
@@ -4247,16 +3370,39 @@ def me(request: Request, u: sqlite3.Row = Depends(get_current_user)):
     auth_log("me_ok", request, user_id=int(u["id"]), role=str(u["role"]))
     return {
         "id": u["id"],
-        "telegram_id": u["telegram_id"],
-        "username": u["username"],
-        "first_name": u["first_name"],
-        "last_name": u["last_name"],
         "login": u["login"],
         "name": u["name"],
         "team": u["team"],
         "role": u["role"],
         "is_active": u["is_active"],
+        "email": u["email"],
+        "last_login_at": u["last_login_at"],
     }
+
+
+@APP.get("/api/notifications")
+def list_notifications(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    u: sqlite3.Row = Depends(get_current_user),
+):
+    from notifications_service import list_notifications as _list
+    rows = _list(int(u["id"]), limit=limit, offset=offset)
+    return {"items": [dict(r) for r in rows]}
+
+
+@APP.post("/api/notifications/{notification_id}/read")
+def mark_notification_read(notification_id: int, u: sqlite3.Row = Depends(get_current_user)):
+    from notifications_service import mark_notification_read as _mark
+    _mark(int(u["id"]), int(notification_id))
+    return {"status": "ok"}
+
+
+@APP.post("/api/notifications/read-all")
+def mark_notifications_read_all(u: sqlite3.Row = Depends(get_current_user)):
+    from notifications_service import mark_all_read as _mark_all
+    _mark_all(int(u["id"]))
+    return {"status": "ok"}
 
 
 
@@ -4264,7 +3410,7 @@ def me(request: Request, u: sqlite3.Row = Depends(get_current_user)):
 def list_users(u: sqlite3.Row = Depends(require_role("admin"))):
     rows = db_fetchall(
         """
-        SELECT id, telegram_id, username, first_name, last_name, login, name, team, role, is_active, cash_scopes, cash_ops, created_at, updated_at
+        SELECT id, login, name, team, role, is_active, cash_scopes, cash_ops, email, last_login_at, password_changed_at, created_at, updated_at
         FROM users
         ORDER BY id ASC;
         """
@@ -4283,6 +3429,7 @@ def create_admin_user(body: AdminUserCreateIn, request: Request, u: sqlite3.Row 
         role=body.role,
         name=body.name,
         team=body.team,
+        email=body.email,
     )
     if body.cash_scopes is not None or body.cash_ops is not None:
         db_exec(
@@ -4324,12 +3471,14 @@ def update_admin_user(
         updates["cash_scopes"] = body.cash_scopes
     if body.cash_ops is not None:
         updates["cash_ops"] = body.cash_ops
+    if body.email is not None:
+        updates["email"] = body.email.strip() or None
     if updates:
         updates["updated_at"] = iso_now(CFG.tzinfo())
         set_clause = ", ".join(f"{k}=?" for k in updates.keys())
         params = list(updates.values()) + [int(user_id)]
         db_exec(f"UPDATE users SET {set_clause} WHERE id=?;", tuple(params))
-    log_auth_event("admin_user_update", str(row["login"] or row["telegram_id"]), request, "success", user_id=int(row["id"]))
+    log_auth_event("admin_user_update", str(row["login"] or row["id"]), request, "success", user_id=int(row["id"]))
     updated = db_fetchone("SELECT * FROM users WHERE id=?;", (int(user_id),))
     return {"item": dict(updated) if updated else None}
 
@@ -4346,11 +3495,12 @@ def reset_admin_user_password(
     if not row:
         raise HTTPException(status_code=404, detail="user_not_found")
     password_hash = hash_password(body.password)
+    now = iso_now(CFG.tzinfo())
     db_exec(
-        "UPDATE users SET password_hash=?, updated_at=? WHERE id=?;",
-        (password_hash, iso_now(CFG.tzinfo()), int(user_id)),
+        "UPDATE users SET password_hash=?, password_changed_at=?, updated_at=? WHERE id=?;",
+        (password_hash, now, now, int(user_id)),
     )
-    log_auth_event("admin_user_reset_password", str(row["login"] or row["telegram_id"]), request, "success", user_id=int(row["id"]))
+    log_auth_event("admin_user_reset_password", str(row["login"] or row["id"]), request, "success", user_id=int(row["id"]))
     return {"status": "ok"}
 
 
@@ -4657,18 +3807,22 @@ def create_service(
             income_type=income_type,
             month_id=month_id,
             service_date=service_date,
-            created_by_telegram_id=int(u["telegram_id"]),
+            created_by_user_id=int(u["id"]),
         )
         if request_id:
             notify_payload = build_cashflow_signer_notification(request_id)
             if notify_payload:
-                import cashflow_bot as cfb
-
+                from notifications_service import notify_users
                 bg.add_task(
-                    cfb.notify_signers_new_request,
-                    **notify_payload,
-                    is_retry=False,
-                    admin_comment=None,
+                    notify_users,
+                    notify_payload["signer_ids"],
+                    event_type="cashflow_request_created",
+                    payload={
+                        "request_id": notify_payload["request_id"],
+                        "account": notify_payload["account"],
+                        "op_type": notify_payload["op_type"],
+                        "amount": notify_payload["amount"],
+                    },
                 )
             if cashless > 0:
                 upsert_service_cashless(
@@ -5789,8 +4943,8 @@ async def api_report_sunday(u: sqlite3.Row = Depends(require_role("admin"))):
 
     tzinfo = ZoneInfo(str(s["timezone"] or CFG.TZ))
     today = dt.datetime.now(tzinfo).date()
-    text, kb = build_sunday_report_text(today)
-    await send_report_to_recipients(text, kb, recipients, raise_on_error=True, kind="report")
+    text = build_sunday_report_text(today)
+    await send_report_to_recipients(text, recipients, raise_on_error=True, kind="report")
     return {"ok": True}
 
 
@@ -5804,8 +4958,8 @@ async def api_report_month_expenses(u: sqlite3.Row = Depends(require_role("admin
 
     tzinfo = ZoneInfo(str(s["timezone"] or CFG.TZ))
     today = dt.datetime.now(tzinfo).date()
-    text, kb = build_month_expenses_report_text(today)
-    await send_report_to_recipients(text, kb, recipients, raise_on_error=True, kind="report")
+    text = build_month_expenses_report_text(today)
+    await send_report_to_recipients(text, recipients, raise_on_error=True, kind="report")
     return {"ok": True}
 
 @APP.post("/api/reports/test")
@@ -5822,7 +4976,7 @@ async def api_report_test(u: sqlite3.Row = Depends(require_role("admin"))):
         f"Если вы это видите, доставка работает.\n"
         f"Время: {now:%Y-%m-%d %H:%M:%S %Z}"
     )
-    await send_report_to_recipients(text, None, recipients, raise_on_error=True, kind="report")
+    await send_report_to_recipients(text, recipients, raise_on_error=True, kind="report")
     return {"ok": True}
 
 # ---------------------------

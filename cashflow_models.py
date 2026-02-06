@@ -93,8 +93,8 @@ def init_cashflow_db(conn: sqlite3.Connection) -> None:
             amount REAL NOT NULL,
             status TEXT NOT NULL,
             attempt INTEGER NOT NULL DEFAULT 1,
-            created_by_telegram_id INTEGER NULL,
-            admin_telegram_id INTEGER NOT NULL,
+            created_by_user_id INTEGER NULL,
+            admin_user_id INTEGER NOT NULL,
             admin_comment TEXT NULL,
             source_kind TEXT NULL,
             source_id INTEGER NULL,
@@ -111,25 +111,25 @@ def init_cashflow_db(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS cash_request_participants (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             request_id INTEGER NOT NULL,
-            telegram_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
             name_snapshot TEXT NOT NULL,
             role_snapshot TEXT NOT NULL,
             is_admin INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
-            UNIQUE(request_id, telegram_id),
+            UNIQUE(request_id, user_id),
             FOREIGN KEY (request_id) REFERENCES cash_requests(id) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS cash_signatures (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             request_id INTEGER NOT NULL,
-            telegram_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
             attempt INTEGER NOT NULL,
             decision TEXT NOT NULL,
             refuse_reason TEXT NULL,
             signature_path TEXT NULL,
             signed_at TEXT NOT NULL,
-            UNIQUE(request_id, telegram_id, attempt),
+            UNIQUE(request_id, user_id, attempt),
             FOREIGN KEY (request_id) REFERENCES cash_requests(id) ON DELETE CASCADE
         );
 
@@ -139,6 +139,18 @@ def init_cashflow_db(conn: sqlite3.Connection) -> None:
     )
     if not _table_has_column(conn, "cash_requests", "source_payload"):
         conn.execute("ALTER TABLE cash_requests ADD COLUMN source_payload TEXT NULL;")
+        conn.commit()
+    if not _table_has_column(conn, "cash_requests", "created_by_user_id"):
+        conn.execute("ALTER TABLE cash_requests ADD COLUMN created_by_user_id INTEGER NULL;")
+        conn.commit()
+    if not _table_has_column(conn, "cash_requests", "admin_user_id"):
+        conn.execute("ALTER TABLE cash_requests ADD COLUMN admin_user_id INTEGER NULL;")
+        conn.commit()
+    if not _table_has_column(conn, "cash_request_participants", "user_id"):
+        conn.execute("ALTER TABLE cash_request_participants ADD COLUMN user_id INTEGER NULL;")
+        conn.commit()
+    if not _table_has_column(conn, "cash_signatures", "user_id"):
+        conn.execute("ALTER TABLE cash_signatures ADD COLUMN user_id INTEGER NULL;")
         conn.commit()
     conn.commit()
 
@@ -183,7 +195,7 @@ def _user_display_name(row: Dict[str, Any]) -> str:
     login = str(row.get("login") or "").strip()
     if login:
         return login
-    return str(row.get("telegram_id") or "unknown")
+    return str(row.get("id") or "unknown")
 
 
 def _load_users_by_role(conn: sqlite3.Connection, role: str) -> Dict[int, Dict[str, Any]]:
@@ -193,10 +205,26 @@ def _load_users_by_role(conn: sqlite3.Connection, role: str) -> Dict[int, Dict[s
         data = dict(row)
         if not _user_is_active(data):
             continue
-        tid = int(data.get("telegram_id") or 0)
-        if tid:
-            out[tid] = data
+        uid = int(data.get("id") or 0)
+        if uid:
+            out[uid] = data
     return out
+
+
+def _split_scope_values(raw: Optional[str]) -> List[str]:
+    if not raw:
+        return []
+    return [p.strip().lower() for p in re.split(r"[,\s]+", str(raw)) if p.strip()]
+
+
+def _user_allows_cash(user_row: Dict[str, Any], account: str, op_type: str) -> bool:
+    scopes = set(_split_scope_values(user_row.get("cash_scopes")))
+    ops = set(_split_scope_values(user_row.get("cash_ops")))
+    if scopes and account not in scopes:
+        return False
+    if ops and op_type not in ops:
+        return False
+    return True
 
 
 def pick_primary_admin(conn: sqlite3.Connection) -> int:
@@ -209,7 +237,7 @@ def pick_primary_admin(conn: sqlite3.Connection) -> int:
 
 
 def pick_cash_signers(conn: sqlite3.Connection, account: str, op_type: str) -> List[int]:
-    """Возвращает список telegram_id подписантов.
+    """Возвращает список user_id подписантов.
 
     Для подписей наличных по суммам не ограничиваем по cash_scopes/cash_ops,
     чтобы активные подписанты всегда могли подписывать заявки.
@@ -217,7 +245,10 @@ def pick_cash_signers(conn: sqlite3.Connection, account: str, op_type: str) -> L
     _normalize_account(account)
     _normalize_op_type(op_type)
     signers = _load_users_by_role(conn, "cash_signer")
-    return sorted(signers.keys())
+    allowed = [
+        uid for uid, row in signers.items() if _user_allows_cash(row, account, op_type)
+    ]
+    return sorted(allowed)
 
 
 def create_cash_request(
@@ -227,7 +258,7 @@ def create_cash_request(
     account: str,
     op_type: str,
     amount: float,
-    created_by_telegram_id: Optional[int],
+    created_by_user_id: Optional[int],
     source_kind: Optional[str] = None,
     source_id: Optional[int] = None,
     source_payload: Optional[Dict[str, Any]] = None,
@@ -238,10 +269,10 @@ def create_cash_request(
     if amount is None or float(amount) <= 0:
         raise ValueError("amount must be > 0")
 
-    admin_tid = pick_primary_admin(conn)
+    admin_uid = pick_primary_admin(conn)
     signers = pick_cash_signers(conn, account_n, op_type_n)
     # admin обязан подписывать, но может быть и в signers — дедуп.
-    participants = list(dict.fromkeys(signers + [admin_tid]))
+    participants = list(dict.fromkeys(signers + [admin_uid]))
 
     now = iso_now()
     payload_json = None
@@ -251,7 +282,7 @@ def create_cash_request(
         """
         INSERT INTO cash_requests (
           account, op_type, amount, status, attempt,
-          created_by_telegram_id, admin_telegram_id,
+          created_by_user_id, admin_user_id,
           source_kind, source_id, source_payload,
           created_at, updated_at
         ) VALUES (?, ?, ?, 'PENDING_SIGNERS', 1, ?, ?, ?, ?, ?, ?, ?);
@@ -260,8 +291,8 @@ def create_cash_request(
             account_n,
             op_type_n,
             float(amount),
-            int(created_by_telegram_id) if created_by_telegram_id else None,
-            int(admin_tid),
+            int(created_by_user_id) if created_by_user_id else None,
+            int(admin_uid),
             str(source_kind) if source_kind else None,
             int(source_id) if source_id is not None else None,
             payload_json,
@@ -275,18 +306,18 @@ def create_cash_request(
     users_map.update(_load_users_by_role(conn, "admin"))
     users_map.update(_load_users_by_role(conn, "owner"))
     users_map.update(_load_users_by_role(conn, "cash_signer"))
-    for tid in participants:
-        u = users_map.get(int(tid), {})
+    for uid in participants:
+        u = users_map.get(int(uid), {})
         name = _user_display_name(u)
         role = str(u.get("role") or "unknown")
-        is_admin = 1 if int(tid) == int(admin_tid) else 0
+        is_admin = 1 if int(uid) == int(admin_uid) else 0
         conn.execute(
             """
             INSERT OR IGNORE INTO cash_request_participants
-              (request_id, telegram_id, name_snapshot, role_snapshot, is_admin, created_at)
+              (request_id, user_id, name_snapshot, role_snapshot, is_admin, created_at)
             VALUES (?, ?, ?, ?, ?, ?);
             """,
-            (request_id, int(tid), name, role, is_admin, now),
+            (request_id, int(uid), name, role, is_admin, now),
         )
 
     conn.commit()
@@ -335,14 +366,14 @@ def list_cash_requests(
 def list_my_cash_requests(
     conn: sqlite3.Connection,
     *,
-    telegram_id: int,
+    user_id: int,
     account: Optional[str] = None,
     only_open: bool = False,
     limit: int = 100,
     offset: int = 0,
 ) -> List[sqlite3.Row]:
-    where: List[str] = ["p.telegram_id=?"]
-    params: List[Any] = [int(telegram_id)]
+    where: List[str] = ["p.user_id=?"]
+    params: List[Any] = [int(user_id)]
     if account:
         where.append("LOWER(r.account)=?")
         params.append(_normalize_account(account))
@@ -403,17 +434,17 @@ def build_request_view(conn: sqlite3.Connection, request_id: int) -> Dict[str, A
 
     sig_map: Dict[Tuple[int, int], sqlite3.Row] = {}
     for s in sigs:
-        sig_map[(int(s["telegram_id"]), int(s["attempt"]))] = s
+        sig_map[(int(s["user_id"]), int(s["attempt"]))] = s
 
     part_views: List[Dict[str, Any]] = []
     for p in participants:
-        tid = int(p["telegram_id"])
-        s1 = sig_map.get((tid, 1))
-        s2 = sig_map.get((tid, 2))
+        uid = int(p["user_id"])
+        s1 = sig_map.get((uid, 1))
+        s2 = sig_map.get((uid, 2))
         state, detail = _effective_participant_state(s1, s2)
         part_views.append(
             {
-                "telegram_id": tid,
+                "user_id": uid,
                 "name": p["name_snapshot"],
                 "role": p["role_snapshot"],
                 "is_admin": bool(int(p["is_admin"]) == 1),
@@ -427,11 +458,11 @@ def build_request_view(conn: sqlite3.Connection, request_id: int) -> Dict[str, A
     return {"request": dict(r), "participants": part_views}
 
 
-def _ensure_participant(conn: sqlite3.Connection, request_id: int, telegram_id: int) -> sqlite3.Row:
+def _ensure_participant(conn: sqlite3.Connection, request_id: int, user_id: int) -> sqlite3.Row:
     p = _fetchone(
         conn,
-        "SELECT * FROM cash_request_participants WHERE request_id=? AND telegram_id=?;",
-        (int(request_id), int(telegram_id)),
+        "SELECT * FROM cash_request_participants WHERE request_id=? AND user_id=?;",
+        (int(request_id), int(user_id)),
     )
     if not p:
         raise PermissionError("User is not a participant")
@@ -453,10 +484,10 @@ def _decode_data_url_png(data_url: str) -> bytes:
         raise ValueError("Invalid base64 signature") from e
 
 
-def _save_signature_png(cfg: CashflowConfig, request_id: int, telegram_id: int, attempt: int, png_bytes: bytes) -> str:
+def _save_signature_png(cfg: CashflowConfig, request_id: int, user_id: int, attempt: int, png_bytes: bytes) -> str:
     req_dir = cfg.uploads_dir / f"req_{int(request_id)}"
     req_dir.mkdir(parents=True, exist_ok=True)
-    name = f"sig_{int(telegram_id)}_a{int(attempt)}_{uuid.uuid4().hex}.png"
+    name = f"sig_{int(user_id)}_a{int(attempt)}_{uuid.uuid4().hex}.png"
     path = req_dir / name
     path.write_bytes(png_bytes)
     # храним относительный путь от uploads_dir
@@ -469,7 +500,7 @@ def record_signature(
     cfg: CashflowConfig,
     *,
     request_id: int,
-    telegram_id: int,
+    user_id: int,
     signature_data_url: str,
     as_admin: bool = False,
 ) -> None:
@@ -477,7 +508,7 @@ def record_signature(
     r = get_cash_request(conn, request_id)
     if r["status"] in ("FINAL", "CANCELLED"):
         raise ValueError("Request is closed")
-    p = _ensure_participant(conn, request_id, telegram_id)
+    p = _ensure_participant(conn, request_id, user_id)
     if as_admin and int(p["is_admin"]) != 1:
         raise PermissionError("Not admin participant")
 
@@ -485,22 +516,22 @@ def record_signature(
     # если уже есть запись на этой попытке — запрещаем
     existing = _fetchone(
         conn,
-        "SELECT * FROM cash_signatures WHERE request_id=? AND telegram_id=? AND attempt=?;",
-        (int(request_id), int(telegram_id), int(attempt)),
+        "SELECT * FROM cash_signatures WHERE request_id=? AND user_id=? AND attempt=?;",
+        (int(request_id), int(user_id), int(attempt)),
     )
     if existing:
         raise ValueError("Already decided on this attempt")
 
     png = _decode_data_url_png(signature_data_url)
     png = normalize_signature_png_bytes(png)
-    rel_path = _save_signature_png(cfg, request_id, telegram_id, attempt, png)
+    rel_path = _save_signature_png(cfg, request_id, user_id, attempt, png)
     now = iso_now()
     conn.execute(
         """
-        INSERT INTO cash_signatures (request_id, telegram_id, attempt, decision, refuse_reason, signature_path, signed_at)
+        INSERT INTO cash_signatures (request_id, user_id, attempt, decision, refuse_reason, signature_path, signed_at)
         VALUES (?, ?, ?, 'SIGNED', NULL, ?, ?);
         """,
-        (int(request_id), int(telegram_id), int(attempt), rel_path, now),
+        (int(request_id), int(user_id), int(attempt), rel_path, now),
     )
     conn.execute(
         "UPDATE cash_requests SET updated_at=? WHERE id=?;",
@@ -514,14 +545,14 @@ def record_refusal(
     conn: sqlite3.Connection,
     *,
     request_id: int,
-    telegram_id: int,
+    user_id: int,
     reason: str,
 ) -> None:
     """Записывает отказ пользователя (REFUSED)."""
     r = get_cash_request(conn, request_id)
     if r["status"] in ("FINAL", "CANCELLED"):
         raise ValueError("Request is closed")
-    p = _ensure_participant(conn, request_id, telegram_id)
+    p = _ensure_participant(conn, request_id, user_id)
     if int(p["is_admin"]) == 1:
         raise PermissionError("Admin cannot refuse")
     attempt = int(r["attempt"])
@@ -530,8 +561,8 @@ def record_refusal(
 
     existing = _fetchone(
         conn,
-        "SELECT * FROM cash_signatures WHERE request_id=? AND telegram_id=? AND attempt=?;",
-        (int(request_id), int(telegram_id), int(attempt)),
+        "SELECT * FROM cash_signatures WHERE request_id=? AND user_id=? AND attempt=?;",
+        (int(request_id), int(user_id), int(attempt)),
     )
     if existing:
         raise ValueError("Already decided on this attempt")
@@ -539,10 +570,10 @@ def record_refusal(
     now = iso_now()
     conn.execute(
         """
-        INSERT INTO cash_signatures (request_id, telegram_id, attempt, decision, refuse_reason, signature_path, signed_at)
+        INSERT INTO cash_signatures (request_id, user_id, attempt, decision, refuse_reason, signature_path, signed_at)
         VALUES (?, ?, ?, 'REFUSED', ?, NULL, ?);
         """,
-        (int(request_id), int(telegram_id), int(attempt), str(reason).strip(), now),
+        (int(request_id), int(user_id), int(attempt), str(reason).strip(), now),
     )
     conn.execute(
         "UPDATE cash_requests SET updated_at=? WHERE id=?;",
@@ -556,13 +587,13 @@ def resend_for_refusals(
     conn: sqlite3.Connection,
     *,
     request_id: int,
-    admin_telegram_id: int,
-    target_telegram_ids: Optional[List[int]] = None,
+    admin_user_id: int,
+    target_user_ids: Optional[List[int]] = None,
     admin_comment: Optional[str] = None,
 ) -> List[int]:
     """Переводит запрос на attempt=2 и возвращает список подписантов, кому нужно отправить уведомление."""
     r = get_cash_request(conn, request_id)
-    if int(r["admin_telegram_id"]) != int(admin_telegram_id):
+    if int(r["admin_user_id"]) != int(admin_user_id):
         # допускаем что админов несколько, но ответственным назначен один
         raise PermissionError("Only primary admin can resend")
     if r["status"] in ("FINAL", "CANCELLED"):
@@ -571,17 +602,17 @@ def resend_for_refusals(
     # вычисляем отказавших на attempt1
     sigs1 = _fetchall(
         conn,
-        "SELECT telegram_id FROM cash_signatures WHERE request_id=? AND attempt=1 AND decision='REFUSED';",
+        "SELECT user_id FROM cash_signatures WHERE request_id=? AND attempt=1 AND decision='REFUSED';",
         (int(request_id),),
     )
-    refused1 = {int(s["telegram_id"]) for s in sigs1}
+    refused1 = {int(s["user_id"]) for s in sigs1}
     if not refused1:
         raise ValueError("No refusals on attempt 1")
 
-    if target_telegram_ids is None or len(target_telegram_ids) == 0:
+    if target_user_ids is None or len(target_user_ids) == 0:
         targets = sorted(refused1)
     else:
-        targets = sorted(set(int(x) for x in target_telegram_ids) & refused1)
+        targets = sorted(set(int(x) for x in target_user_ids) & refused1)
         if not targets:
             raise ValueError("No valid targets among refused signers")
 
@@ -594,9 +625,9 @@ def resend_for_refusals(
     return targets
 
 
-def cancel_request(conn: sqlite3.Connection, *, request_id: int, admin_telegram_id: int, comment: Optional[str] = None) -> None:
+def cancel_request(conn: sqlite3.Connection, *, request_id: int, admin_user_id: int, comment: Optional[str] = None) -> None:
     r = get_cash_request(conn, request_id)
-    if int(r["admin_telegram_id"]) != int(admin_telegram_id):
+    if int(r["admin_user_id"]) != int(admin_user_id):
         raise PermissionError("Only primary admin can cancel")
     if r["status"] in ("FINAL", "CANCELLED"):
         return
@@ -616,15 +647,15 @@ def recompute_request_status(conn: sqlite3.Connection, request_id: int) -> None:
 
     participants = get_request_participants(conn, request_id)
     sigs = get_request_signatures(conn, request_id)
-    sig_map: Dict[Tuple[int, int], sqlite3.Row] = {(int(s["telegram_id"]), int(s["attempt"])): s for s in sigs}
+    sig_map: Dict[Tuple[int, int], sqlite3.Row] = {(int(s["user_id"]), int(s["attempt"])): s for s in sigs}
 
     all_non_admin_done = True
     admin_signed = False
     for p in participants:
-        tid = int(p["telegram_id"])
+        uid = int(p["user_id"])
         is_admin = int(p["is_admin"]) == 1
-        s1 = sig_map.get((tid, 1))
-        s2 = sig_map.get((tid, 2))
+        s1 = sig_map.get((uid, 1))
+        s2 = sig_map.get((uid, 2))
         state, _detail = _effective_participant_state(s1, s2)
 
         if is_admin:
@@ -682,8 +713,8 @@ def list_withdraw_act_rows(
       - "Ожидает подписи"
     signature_path:
       - относительный путь PNG (attempt=2 если есть, иначе attempt=1)
-    participant_telegram_id:
-      - telegram_id участника (нужно для загрузки PNG подписи через API)
+    participant_user_id:
+      - user_id участника (нужно для загрузки PNG подписи через API)
 
     ВАЖНО:
       - date возвращаем ТОЛЬКО дату YYYY-MM-DD (без времени)
@@ -749,7 +780,7 @@ def list_withdraw_act_rows(
             r.op_type,
             r.amount,
             r.created_at,
-            p.telegram_id AS participant_telegram_id,
+            p.user_id AS participant_user_id,
             p.name_snapshot,
             p.role_snapshot,
             p.is_admin,
@@ -762,9 +793,9 @@ def list_withdraw_act_rows(
         FROM cash_requests r
         JOIN cash_request_participants p ON p.request_id = r.id
         LEFT JOIN cash_signatures s1
-          ON s1.request_id = r.id AND s1.telegram_id = p.telegram_id AND s1.attempt = 1
+          ON s1.request_id = r.id AND s1.user_id = p.user_id AND s1.attempt = 1
         LEFT JOIN cash_signatures s2
-          ON s2.request_id = r.id AND s2.telegram_id = p.telegram_id AND s2.attempt = 2
+          ON s2.request_id = r.id AND s2.user_id = p.user_id AND s2.attempt = 2
         {where}
         ORDER BY r.created_at DESC, r.id DESC, p.is_admin ASC, p.id ASC
         """,
@@ -790,7 +821,7 @@ def list_withdraw_act_rows(
         out.append(
             {
                 "request_id": int(row["request_id"]),
-                "participant_telegram_id": int(row["participant_telegram_id"]),
+                "participant_user_id": int(row["participant_user_id"]),
                 "account": row["account"],
                 "op_type": row["op_type"],
                 "amount": amount_val,                 # число, округлено до 2 знаков

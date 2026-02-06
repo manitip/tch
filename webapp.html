@@ -1,6 +1,6 @@
 <!-- webapp.html
-  Telegram WebApp UI (один файл, без сборки)
-  Требования: mobile-first, тёмная тема из Telegram theme params, bottom bar, анимации, Chart.js.
+  Web UI (один файл, без сборки)
+  Требования: mobile-first, bottom bar, анимации, Chart.js.
 -->
 <!doctype html>
 <html lang="ru">
@@ -9,9 +9,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="color-scheme" content="light dark" />
   <title>БУХ • Бухгалтерия</title>
-
-  <!-- Telegram WebApp -->
-  <script src="https://telegram.org/js/telegram-web-app.js"></script>
 
   <!-- Material Symbols -->
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:wght@300;400;500;600&display=swap" />
@@ -152,6 +149,52 @@
       -webkit-tap-highlight-color: transparent;
     }
     .btnIcon:active{ transform: scale(.98); }
+    .notifBadge{
+      position:absolute;
+      top:-4px;
+      right:-4px;
+      min-width:18px;
+      height:18px;
+      padding:0 5px;
+      border-radius:999px;
+      background: var(--danger);
+      color:#fff;
+      font-size:11px;
+      display:grid;
+      place-items:center;
+    }
+    .notifBadge.hidden{ display:none; }
+    .notifOverlay{
+      position:fixed;
+      inset:0;
+      background: var(--overlay-dim);
+      display:none;
+      align-items:center;
+      justify-content:center;
+      z-index:2000;
+      padding:16px;
+    }
+    .notifOverlay.show{ display:flex; }
+    .notifPanel{
+      width:min(520px, 100%);
+      max-height:80vh;
+      overflow:auto;
+      background: var(--card);
+      border:1px solid var(--stroke);
+      border-radius: 16px;
+      padding:16px;
+      box-shadow: var(--shadow);
+    }
+    .notifItem{
+      padding:12px;
+      border-radius:12px;
+      border:1px solid var(--stroke);
+      background: var(--card2);
+      margin-bottom:10px;
+    }
+    .notifItem.unread{
+      border-color: var(--accent2);
+    }
 
     .section{
       margin-top: 14px;
@@ -2169,7 +2212,10 @@
         </button>
       </div>
       <div class="row" style="gap:10px;">
-
+        <button id="notifBtn" class="btnIcon" type="button" aria-label="Уведомления" style="position:relative;">
+          <span class="icon">notifications</span>
+          <span id="notifBadge" class="notifBadge hidden">0</span>
+        </button>
         <button id="refreshBtn" class="btnIcon" type="button" aria-label="Обновить">
           <span class="icon">refresh</span>
         </button>
@@ -3057,7 +3103,7 @@
                         <span class="icon">download</span> Скачать Excel (год)
                       </button>
                     </div>
-                    <div class="tiny muted2" style="margin-top:8px;">Откроется в браузере Telegram (скачивание зависит от клиента).</div>
+                    <div class="tiny muted2" style="margin-top:8px;">Откроется в браузере.</div>
                   </div>
                 </div>
 
@@ -3484,6 +3530,21 @@
   </div>
 
 
+  <div id="notifOverlay" class="notifOverlay" role="dialog" aria-modal="true" aria-label="Уведомления">
+    <div class="notifPanel">
+      <div class="row" style="justify-content:space-between;align-items:center;">
+        <div class="sectionHeader" style="margin:0;"><h3>Уведомления</h3></div>
+        <button id="notifCloseBtn" class="btnIcon" type="button" aria-label="Закрыть">
+          <span class="icon">close</span>
+        </button>
+      </div>
+      <div class="row" style="justify-content:flex-end;margin:10px 0;">
+        <button id="notifReadAllBtn" class="btn" type="button">Отметить все как прочитанные</button>
+      </div>
+      <div id="notifList"></div>
+    </div>
+  </div>
+
   <script>
     /**********************
      * Utilities
@@ -3590,84 +3651,26 @@
     }
 
     /**********************
-     * Telegram init + theme
+     * Theme
      **********************/
-    function getTelegramWebApp(){
-      return window.Telegram?.WebApp || null;
-    }
     const ThemeState = {
       mode: "auto",
       media: window.matchMedia?.("(prefers-color-scheme: dark)")
     };
-
-    function detectTelegramTheme(){
-      const p = getTelegramWebApp()?.themeParams || {};
-      if (!p.bg_color) return null;
-      const hex = p.bg_color.replace("#","");
-      if (hex.length !== 6) return null;
-      const r = parseInt(hex.slice(0,2),16);
-      const g = parseInt(hex.slice(2,4),16);
-      const b = parseInt(hex.slice(4,6),16);
-      const lum = 0.2126*r + 0.7152*g + 0.0722*b;
-      return (lum > 180) ? "light" : "dark";
-    }
-
-    const tgThemeParams = getTelegramWebApp()?.themeParams || {};
-
-    function applyTelegramThemeVars(theme){
-      const root = document.documentElement.style;
-      const isDark = theme === "dark";
-      if (!isDark) {
-        root.removeProperty("--bg");
-        root.removeProperty("--card");
-        root.removeProperty("--card2");
-        root.removeProperty("--text");
-        root.removeProperty("--muted");
-        root.removeProperty("--muted2");
-        return;
-      }
-      if (tgThemeParams.bg_color) root.setProperty("--bg", tgThemeParams.bg_color);
-      if (tgThemeParams.secondary_bg_color) {
-        root.setProperty("--card", hexToRgba(tgThemeParams.secondary_bg_color, .65));
-        root.setProperty("--card2", hexToRgba(tgThemeParams.secondary_bg_color, .75));
-      }
-      if (tgThemeParams.text_color) root.setProperty("--text", hexToRgba(tgThemeParams.text_color, .92));
-      if (tgThemeParams.hint_color) {
-        root.setProperty("--muted", hexToRgba(tgThemeParams.hint_color, .72));
-        root.setProperty("--muted2", hexToRgba(tgThemeParams.hint_color, .5));
-      }
-    }
 
     function applyTheme(mode){
       const normalized = (mode || "auto").toLowerCase();
       ThemeState.mode = (normalized === "system") ? "auto" : normalized;
       let theme = ThemeState.mode;
       if (theme === "auto") {
-        theme = detectTelegramTheme() || (ThemeState.media?.matches ? "dark" : "light");
+        theme = (ThemeState.media?.matches ? "dark" : "light");
       }
       document.documentElement.dataset.theme = theme;
-      applyTelegramThemeVars(theme);
-    }
-
-    const tgApp = getTelegramWebApp();
-    if (tgApp) {
-      tgApp.ready();
-      tgApp.expand();
     }
 
     ThemeState.media?.addEventListener?.("change", ()=>{
       if (ThemeState.mode === "auto") applyTheme("auto");
     });
-
-    function hexToRgba(hex, a){
-      try{
-        const h = hex.replace("#","");
-        const r = parseInt(h.slice(0,2),16);
-        const g = parseInt(h.slice(2,4),16);
-        const b = parseInt(h.slice(4,6),16);
-        return `rgba(${r},${g},${b},${a})`;
-      }catch{ return ""; }
-    }
 
     /**********************
      * API layer
@@ -3697,7 +3700,6 @@
         dlog("boot", {
           href: location.href,
           api: p.get("api"),
-          token_qs: maskTok(p.get("token")),
           ua: navigator.userAgent,
         });
       })();
@@ -3729,8 +3731,14 @@
       }
 
 
+    function getCookie(name){
+      const value = `; ${document.cookie}`;
+      const parts = value.split(`; ${name}=`);
+      if (parts.length === 2) return parts.pop().split(';').shift();
+      return "";
+    }
+
     const API = {
-      token: null,
       user: null,
       baseUrl: (() => {
         const params = new URLSearchParams(location.search);
@@ -3751,24 +3759,10 @@
 
 
       setSession(data){
-        API.token = data?.token || null;
         API.user = data?.user || null;
-        if (API.token){
-          localStorage.setItem("sessionToken", API.token);
-        } else {
-          localStorage.removeItem("sessionToken");
-        }
-        if (API.user){
-          localStorage.setItem("sessionUser", JSON.stringify(API.user));
-        } else {
-          localStorage.removeItem("sessionUser");
-        }
       },
       clearSession(){
-        API.token = null;
         API.user = null;
-        localStorage.removeItem("sessionToken");
-        localStorage.removeItem("sessionUser");
       },
       async authLogin(payload){
         const data = await API.post("/api/auth/login", payload);
@@ -3792,23 +3786,12 @@
 
 
       async ensureAuth(){
-        dlog("ensureAuth:start", { token: maskTok(API.token) });
-        diag("ensureAuth:enter", { hasToken: !!API.token });
-
-        if (!API.token) {
-          diag("ensureAuth:missing_token");
-          throw new Error("Missing session token");
-        }
-
         try{
           const me = await API.get("/api/me");
-          diag("ensureAuth:me_ok", { id: me?.id || null, role: me?.role || null });
-          dlog("ensureAuth:me_ok", { id: me?.id, role: me?.role });
-
           API.user = me;
           return me;
         }catch(err){
-          diag("ensureAuth:me_fail", { err: String(err?.message || err) });
+          window.location.href = "/login";
           throw err;
         }
       },
@@ -3818,9 +3801,7 @@
         return API.req(path, {method:"GET"});
       },
       async getBlob(path){
-        const headers = {};
-        if (API.token) headers["Authorization"] = `Bearer ${API.token}`;
-        const res = await fetch(`${API.baseUrl}${path}`, { method: "GET", headers });
+        const res = await fetch(`${API.baseUrl}${path}`, { method: "GET", credentials: "include" });
 
         if (res.status === 401 || res.status === 403) {
           const txt = await res.text().catch(()=> "");
@@ -3845,15 +3826,18 @@
         const method = String(opts.method || "GET").toUpperCase();
 
         const headers = Object.assign({"Content-Type":"application/json"}, opts.headers||{});
-        if (API.token) headers["Authorization"] = `Bearer ${API.token}`;
+        if (!["GET","HEAD","OPTIONS"].includes(method)){
+          const csrf = getCookie("csrf_token");
+          if (csrf) headers["X-CSRF-Token"] = csrf;
+        }
 
         // Логируем только auth/ме — чтобы не заспамить
         if (path.startsWith("/api/auth") || path === "/api/me") {
-          dlog("REQ", { method, path, baseUrl: API.baseUrl, token: maskTok(API.token) });
-          diag("req:send", { path, method, hasToken: !!API.token });
+          dlog("REQ", { method, path, baseUrl: API.baseUrl });
+          diag("req:send", { path, method });
         }
 
-        const res = await fetch(`${API.baseUrl}${path}`, { ...opts, headers });
+        const res = await fetch(`${API.baseUrl}${path}`, { ...opts, headers, credentials: "include" });
 
         if (path.startsWith("/api/auth") || path === "/api/me") {
           dlog("RES", { method, path, status: res.status });
@@ -3876,27 +3860,78 @@
         if (ctype.includes("application/json")) return res.json();
         return res.text();
       },
-
-
-      loadStoredSession(){
-        const storedToken = localStorage.getItem("sessionToken");
-        if (storedToken) API.token = storedToken;
-
-        const storedUser = localStorage.getItem("sessionUser");
-        if (storedUser) {
-          try{
-            API.user = JSON.parse(storedUser);
-          }catch{
-            API.user = null;
-          }
-        }
-
-        dlog("loadStoredSession", { token: maskTok(API.token), hasUser: !!API.user });
-        diag("loadStoredSession", { hasToken: !!API.token, hasUser: !!API.user });
-      },
     };
 
 
+    function formatNotification(item){
+      let payload = {};
+      try{ payload = item.payload_json ? JSON.parse(item.payload_json) : {}; }catch{}
+      const type = item.type || "notification";
+      if (type === "cashflow_request_created"){
+        return `Нужна подпись по заявке #${payload.request_id}`;
+      }
+      if (type === "cashflow_request_retry"){
+        return `Повторная подпись по заявке #${payload.request_id}`;
+      }
+      if (type === "cashflow_decision"){
+        return `Подписант ${payload.signer_name || "—"} ${payload.decision === "REFUSED" ? "отказал" : "подписал"} заявку #${payload.request_id}`;
+      }
+      if (type === "cashflow_finalized"){
+        return `Заявка #${payload.request_id} завершена (${payload.status || "FINAL"})`;
+      }
+      if (type === "report"){
+        return payload.message || "Отчёт";
+      }
+      return payload.message || type;
+    }
+
+    async function refreshNotifications(){
+      try{
+        const res = await API.get("/api/notifications?limit=50");
+        State.notifications = res.items || [];
+        renderNotifications();
+      }catch{
+        // ignore
+      }
+    }
+
+    function renderNotifications(){
+      const list = $("#notifList");
+      if (!list) return;
+      const items = State.notifications || [];
+      const unread = items.filter((n)=> !n.is_read).length;
+      const badge = $("#notifBadge");
+      if (badge){
+        badge.textContent = String(unread);
+        badge.classList.toggle("hidden", unread === 0);
+      }
+      if (!items.length){
+        list.innerHTML = `<div class="card bigCard"><div class="tiny muted2">Нет уведомлений.</div></div>`;
+        return;
+      }
+      list.innerHTML = items.map((n)=>{
+        const msg = escapeHtml(formatNotification(n));
+        const time = escapeHtml(String(n.created_at || ""));
+        return `<div class="notifItem ${n.is_read ? "" : "unread"}">
+          <div class="tiny muted2">${time}</div>
+          <div>${msg}</div>
+        </div>`;
+      }).join("");
+    }
+
+    function openNotifPanel(){
+      $("#notifOverlay")?.classList.add("show");
+      refreshNotifications();
+    }
+
+    function closeNotifPanel(){
+      $("#notifOverlay")?.classList.remove("show");
+    }
+
+    async function markAllNotificationsRead(){
+      await API.post("/api/notifications/read-all", {});
+      await refreshNotifications();
+    }
 
 
     function parseApiError(err){
@@ -4358,7 +4393,9 @@
       return new Promise((resolve, reject)=>{
         const xhr = new XMLHttpRequest();
         xhr.open("POST", `${API.baseUrl}/api/expenses/${expenseId}/attachments`);
-        if (API.token) xhr.setRequestHeader("Authorization", `Bearer ${API.token}`);
+        xhr.withCredentials = true;
+        const csrf = getCookie("csrf_token");
+        if (csrf) xhr.setRequestHeader("X-CSRF-Token", csrf);
         xhr.onload = ()=>{
           const ok = xhr.status >= 200 && xhr.status < 300;
           if (!ok){
@@ -7073,10 +7110,13 @@
         setBackupBusy(true);
         const form = new FormData();
         form.append("file", file);
-        const headers = API.token ? {"Authorization": `Bearer ${API.token}`} : {};
+        const headers = {};
+        const csrf = getCookie("csrf_token");
+        if (csrf) headers["X-CSRF-Token"] = csrf;
         const res = await fetch(`${API.baseUrl}/api/backups/restore`, {
           method: "POST",
           headers,
+          credentials: "include",
           body: form
         });
         if (!res.ok){
@@ -7704,13 +7744,13 @@
 
         if (sigVal.startsWith("ОТКАЗ")){
           tdSig.appendChild(makeBadge(sigVal, "danger"));
-        } else if (r.signature_path && r.request_id && r.participant_telegram_id){
+        } else if (r.signature_path && r.request_id && r.participant_user_id){
           const img = document.createElement("img");
           img.className = "sigImg";
           img.alt = "Подпись";
           tdSig.appendChild(img);
 
-          ensureSignatureImg(img, r.request_id, r.participant_telegram_id).catch(()=>{
+          ensureSignatureImg(img, r.request_id, r.participant_user_id).catch(()=>{
             tdSig.innerHTML = "";
             tdSig.appendChild(makeBadge(sigVal || "Подписано"));
           });
@@ -7747,13 +7787,13 @@
     }
 
     // Нужен метод API.getBlob (см. ниже)
-    async function ensureSignatureImg(imgEl, requestId, participantTelegramId){
-      const key = `${requestId}:${participantTelegramId}`;
+    async function ensureSignatureImg(imgEl, requestId, participantUserId){
+      const key = `${requestId}:${participantUserId}`;
       if (CASH_SIG_CACHE.has(key)){
         imgEl.src = CASH_SIG_CACHE.get(key);
         return;
       }
-      const blob = await API.getBlob(`/api/cashflow/requests/${requestId}/participants/${participantTelegramId}/signature.png`);
+      const blob = await API.getBlob(`/api/cashflow/requests/${requestId}/participants/${participantUserId}/signature.png`);
       const url = URL.createObjectURL(blob);
       CASH_SIG_CACHE.set(key, url);
       imgEl.src = url;
@@ -7808,10 +7848,10 @@
         const team = escapeHtml(u.team || "—");
         const role = escapeHtml(u.role || "—");
         const login = escapeHtml(u.login || "—");
-        const telegramId = escapeHtml(String(u.telegram_id || "—"));
+        const userId = escapeHtml(String(u.id || "—"));
         const activeFlag = (u.is_active ?? u.active) ? true : false;
         const active = activeFlag ? "Активен" : "Отключён";
-                <div class="tiny muted2">Telegram ID: ${telegramId}</div>
+                <div class="tiny muted2">User ID: ${userId}</div>
                 <div class="tiny muted2">Логин: ${login} • Тим: ${team}</div>
               </div>
               <div class="chip">${role}</div>
@@ -8292,9 +8332,7 @@
      * Exports
      **********************/
     function openDownload(url){
-      const token = API.token || localStorage.getItem("sessionToken");
-      const headers = token ? { "Authorization": `Bearer ${token}` } : {};
-      fetch(url, { headers })
+      fetch(url, { credentials: "include" })
         .then((res)=>{
           if (!res.ok) throw new Error("download_failed");
           return res.blob();
@@ -8491,6 +8529,10 @@
       });
 
       // topbar
+      $("#notifBtn").addEventListener("click", openNotifPanel);
+      $("#notifCloseBtn").addEventListener("click", closeNotifPanel);
+      $("#notifOverlay").addEventListener("click", (e)=>{ if (e.target === $("#notifOverlay")) closeNotifPanel(); });
+      $("#notifReadAllBtn").addEventListener("click", ()=> markAllNotificationsRead().catch(()=> {}));
       $("#refreshBtn").addEventListener("click", async ()=>{
         try{
           await refreshAll();
@@ -8959,12 +9001,17 @@
       const rawRole = me?.role || "viewer";
       State.role = rawRole === "owner" ? "admin" : rawRole;
       if (State.role === "cash_signer"){
-        window.location.replace(`${API.baseUrl}/cashapp`);
+        window.location.replace(`${API.baseUrl}/cash`);
         return;
       }
       const displayName = (API.user?.name || API.user?.login || "").trim();
       $("#roleBadge").textContent = `роль: ${displayName || State.role}`;
       applyRoleUI();
+      const screenParam = new URLSearchParams(location.search).get("screen");
+      if (screenParam && ["dashboard", "add", "history", "settings", "users"].includes(screenParam)){
+        switchScreen(screenParam === "users" ? "settings" : screenParam);
+      }
+      refreshNotifications();
 
       const themePromise = loadThemeSetting().catch(()=> applyTheme("auto"));
       await loadMonthsForYear(State.year);
@@ -9043,18 +9090,14 @@
 
       await loadBootstrapStatus();
 
-      if (API.token){
-        try{
-          const me = await API.ensureAuth();
-          hideAuthGate();
-          await handleAuthenticated(me);
-          return;
-        }catch{
-          API.clearSession();
-        }
+      try{
+        const me = await API.ensureAuth();
+        hideAuthGate();
+        await handleAuthenticated(me);
+        return;
+      }catch{
+        API.clearSession();
       }
-
-      showAuthGate("Введите логин и пароль.", "Авторизация");
     }
 
 
