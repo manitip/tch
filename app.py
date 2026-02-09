@@ -5012,16 +5012,45 @@ def text_bbox(draw: Any, text: str, font: Any) -> Tuple[int, int]:
     return bbox[2] - bbox[0], bbox[3] - bbox[1]
 
 
-def draw_card(draw: Any, xy: Tuple[int, int, int, int], radius: int, fill: Tuple[int, int, int]) -> None:
+def draw_card(
+    draw: Any,
+    xy: Tuple[int, int, int, int],
+    radius: int,
+    fill: Tuple[int, int, int],
+    shadow: Tuple[int, int, int] = (210, 215, 225),
+    outline: Optional[Tuple[int, int, int]] = None,
+    outline_width: int = 0,
+) -> None:
     x0, y0, x1, y1 = xy
     shadow_offset = int(max(2, radius / 3))
-    shadow_color = (210, 215, 225)
     draw.rounded_rectangle(
         (x0 + shadow_offset, y0 + shadow_offset, x1 + shadow_offset, y1 + shadow_offset),
         radius=radius,
-        fill=shadow_color,
+        fill=shadow,
     )
     draw.rounded_rectangle((x0, y0, x1, y1), radius=radius, fill=fill)
+    if outline and outline_width > 0:
+        draw.rounded_rectangle((x0, y0, x1, y1), radius=radius, outline=outline, width=outline_width)
+
+
+def draw_pill(
+    draw: Any,
+    xy: Tuple[int, int],
+    text: str,
+    font: Any,
+    fill: Tuple[int, int, int],
+    text_color: Tuple[int, int, int],
+    padding: Tuple[int, int] = (10, 4),
+    radius: int = 10,
+) -> Tuple[int, int]:
+    x, y = xy
+    text_w, text_h = text_bbox(draw, text, font)
+    pad_x, pad_y = padding
+    pill_w = text_w + pad_x * 2
+    pill_h = text_h + pad_y * 2
+    draw.rounded_rectangle((x, y, x + pill_w, y + pill_h), radius=radius, fill=fill)
+    draw.text((x + pad_x, y + pad_y), text, font=font, fill=text_color)
+    return pill_w, pill_h
 
 
 def render_month_report_png(
@@ -5039,7 +5068,20 @@ def render_month_report_png(
     w, h = size
     scale = w / 1600
 
-    bg = Image.new("RGB", size, (245, 247, 251))
+    color_bg = (244, 246, 250)
+    color_card = (255, 255, 255)
+    color_card2 = (238, 242, 247)
+    color_text = (17, 24, 39)
+    color_muted = (75, 85, 99)
+    color_muted2 = (107, 114, 128)
+    color_stroke = (226, 232, 240)
+    color_shadow = (214, 220, 232)
+    color_accent = (16, 185, 129)
+    color_accent_soft = (209, 250, 229)
+    color_danger = (239, 68, 68)
+    color_warn = (245, 158, 11)
+
+    bg = Image.new("RGB", size, color_bg)
     draw = ImageDraw.Draw(bg)
 
     font_title = load_ttf_font(ImageFont, size=int(40 * scale), bold=True)
@@ -5055,7 +5097,7 @@ def render_month_report_png(
 
     month_name = RU_MONTHS[int(month_row["month"]) - 1]
     title = f"Отчёт за {month_name} {int(month_row['year'])}"
-    draw.text((margin, margin), title, font=font_title, fill=(28, 33, 39))
+    draw.text((margin, margin), title, font=font_title, fill=color_text)
 
     kpi_y = margin + int(60 * scale)
     kpi_h = int(140 * scale)
@@ -5071,9 +5113,9 @@ def render_month_report_png(
     for idx, (label, value) in enumerate(kpis):
         x0 = margin + idx * (kpi_w + gap)
         card = (x0, kpi_y, x0 + kpi_w, kpi_y + kpi_h)
-        draw_card(draw, card, radius, (255, 255, 255))
-        draw.text((x0 + int(18 * scale), kpi_y + int(18 * scale)), label, font=font_kpi_label, fill=(94, 102, 112))
-        draw.text((x0 + int(18 * scale), kpi_y + int(58 * scale)), value, font=font_kpi_value, fill=(20, 24, 29))
+        draw_card(draw, card, radius, color_card, shadow=color_shadow)
+        draw.text((x0 + int(18 * scale), kpi_y + int(18 * scale)), label, font=font_kpi_label, fill=color_muted2)
+        draw.text((x0 + int(18 * scale), kpi_y + int(58 * scale)), value, font=font_kpi_value, fill=color_text)
 
     section_y = kpi_y + kpi_h + int(30 * scale)
     footer_h = int(36 * scale)
@@ -5083,10 +5125,13 @@ def render_month_report_png(
     left_x = margin
     right_x = left_x + left_w + gap
 
-    plan_h = int(210 * scale)
+    list_card_h = min(int(240 * scale), max(int(160 * scale), int(content_h * 0.28)))
+    top_h = max(content_h - list_card_h - gap, int(260 * scale))
+
+    plan_h = min(int(210 * scale), int(top_h * 0.45))
     plan_card = (left_x, section_y, left_x + left_w, section_y + plan_h)
-    draw_card(draw, plan_card, radius, (255, 255, 255))
-    draw.text((left_x + int(18 * scale), section_y + int(16 * scale)), "План/цели", font=font_section, fill=(28, 33, 39))
+    draw_card(draw, plan_card, radius, color_card, shadow=color_shadow)
+    draw.text((left_x + int(18 * scale), section_y + int(16 * scale)), "План/цели", font=font_section, fill=color_text)
 
     psdpm = summary["psdpm"]
     psdpm_text = f"{psdpm*100:.1f}%" if isinstance(psdpm, (int, float)) else "—"
@@ -5101,18 +5146,35 @@ def render_month_report_png(
     plan_y = section_y + int(55 * scale)
     for idx, (label, value) in enumerate(plan_items):
         line_y = plan_y + idx * int(26 * scale)
-        draw.text((left_x + int(18 * scale), line_y), label, font=font_body, fill=(94, 102, 112))
+        draw.text((left_x + int(18 * scale), line_y), label, font=font_body, fill=color_muted)
         value_w, _ = text_bbox(draw, value, font_body)
-        draw.text((left_x + left_w - int(18 * scale) - value_w, line_y), value, font=font_body, fill=(28, 33, 39))
+        draw.text((left_x + left_w - int(18 * scale) - value_w, line_y), value, font=font_body, fill=color_text)
 
     expenses_card_y = section_y + plan_h + gap
-    expenses_card = (left_x, expenses_card_y, left_x + left_w, section_y + content_h)
-    draw_card(draw, expenses_card, radius, (255, 255, 255))
+    expenses_card = (left_x, expenses_card_y, left_x + left_w, section_y + top_h)
+    draw_card(
+        draw,
+        expenses_card,
+        radius,
+        color_card,
+        shadow=color_shadow,
+        outline=color_accent,
+        outline_width=max(1, int(2 * scale)),
+    )
     draw.text(
         (left_x + int(18 * scale), expenses_card_y + int(16 * scale)),
         "Структура расходов",
         font=font_section,
-        fill=(28, 33, 39),
+        fill=color_text,
+    )
+    draw_pill(
+        draw,
+        (left_x + left_w - int(150 * scale), expenses_card_y + int(14 * scale)),
+        "Основной счёт",
+        font_small,
+        fill=color_accent_soft,
+        text_color=color_accent,
+        radius=int(10 * scale),
     )
 
     pie_pad = int(18 * scale)
@@ -5140,7 +5202,7 @@ def render_month_report_png(
             (pie_x0 + (pie_size - msg_w) / 2, pie_y0 + (pie_size - msg_h) / 2),
             msg,
             font=font_body,
-            fill=(140, 148, 158),
+            fill=color_muted2,
         )
     else:
         start_angle = -90
@@ -5165,81 +5227,41 @@ def render_month_report_png(
             (legend_x + int(16 * scale), legend_y + idx * int(22 * scale) - int(2 * scale)),
             label,
             font=font_small,
-            fill=(28, 33, 39),
+            fill=color_text,
         )
 
-    list_x0 = legend_x
-    list_x1 = left_x + left_w - int(18 * scale)
-    list_y0 = pie_top + int(120 * scale)
-    list_y1 = expenses_card[3] - int(16 * scale)
-    list_header_h = int(20 * scale)
-    if list_y1 > list_y0 + list_header_h:
-        draw.rounded_rectangle(
-            (list_x0, list_y0, list_x1, list_y0 + list_header_h),
-            radius=int(8 * scale),
-            fill=(235, 238, 245),
-        )
-        draw.text(
-            (list_x0 + int(8 * scale), list_y0 + int(2 * scale)),
-            "Все расходы",
-            font=font_small,
-            fill=(58, 66, 76),
-        )
-
-        def truncate_text(text: str, max_width: int, font: Any) -> str:
-            if text_bbox(draw, text, font)[0] <= max_width:
-                return text
-            ellipsis = "…"
-            for i in range(len(text), 0, -1):
-                candidate = text[:i] + ellipsis
-                if text_bbox(draw, candidate, font)[0] <= max_width:
-                    return candidate
-            return ellipsis
-
-        expense_items: List[str] = []
-        for row in expenses:
-            date = dt.date.fromisoformat(row["expense_date"]).strftime("%d.%m")
-            category = str(row["category"] or "—")
-            title = str(row["title"] or "—")
-            total = fmt_money(float(row["total"] or 0.0))
-            expense_items.append(f"{date} {category}: {title} — {total}")
-
-        line_h = int(16 * scale)
-        list_area_h = list_y1 - list_y0 - list_header_h - int(6 * scale)
-        max_lines = max(int(list_area_h / line_h), 1)
-        columns = max(1, math.ceil(len(expense_items) / max_lines))
-        column_w = (list_x1 - list_x0) / columns
-        for col in range(columns):
-            col_x = list_x0 + col * column_w
-            if col > 0:
-                draw.line(
-                    (col_x, list_y0 + list_header_h, col_x, list_y1),
-                    fill=(228, 232, 240),
-                    width=max(1, int(1 * scale)),
-                )
-            for row_idx in range(max_lines):
-                item_idx = col * max_lines + row_idx
-                if item_idx >= len(expense_items):
-                    break
-                y = list_y0 + list_header_h + int(6 * scale) + row_idx * line_h
-                text = truncate_text(expense_items[item_idx], int(column_w - int(8 * scale)), font_small)
-                draw.text((col_x + int(6 * scale), y), text, font=font_small, fill=(42, 48, 56))
-
-    chart_card = (right_x, section_y, right_x + right_w, section_y + content_h)
-    draw_card(draw, chart_card, radius, (255, 255, 255))
+    chart_card = (right_x, section_y, right_x + right_w, section_y + top_h)
+    draw_card(
+        draw,
+        chart_card,
+        radius,
+        color_card,
+        shadow=color_shadow,
+        outline=color_accent,
+        outline_width=max(1, int(2 * scale)),
+    )
     draw.text(
         (right_x + int(18 * scale), section_y + int(16 * scale)),
         "Доходы по служениям",
         font=font_section,
-        fill=(28, 33, 39),
+        fill=color_text,
+    )
+    draw_pill(
+        draw,
+        (right_x + right_w - int(150 * scale), section_y + int(14 * scale)),
+        "Основной счёт",
+        font_small,
+        fill=color_accent_soft,
+        text_color=color_accent,
+        radius=int(10 * scale),
     )
 
     chart_pad = int(24 * scale)
     chart_x0 = right_x + chart_pad
     chart_y0 = section_y + int(52 * scale)
     chart_w = right_w - chart_pad * 2
-    sub_table_h = int(150 * scale)
-    chart_h = content_h - sub_table_h - int(90 * scale)
+    sub_table_h = min(int(150 * scale), int(top_h * 0.35))
+    chart_h = top_h - sub_table_h - int(90 * scale)
     base_y = chart_y0 + chart_h - int(20 * scale)
 
     service_items = []
@@ -5261,7 +5283,7 @@ def render_month_report_png(
             (chart_x0 + (chart_w - msg_w) / 2, chart_y0 + (chart_h - msg_h) / 2),
             msg,
             font=font_body,
-            fill=(140, 148, 158),
+            fill=color_muted2,
         )
     else:
         bar_gap = max(4, int(6 * scale))
@@ -5271,21 +5293,21 @@ def render_month_report_png(
             bar_h = int((item["total"] / max_total) * (chart_h - int(40 * scale)))
             status = item["status"]
             status_ok = status == "Собрана"
-            bar_color = (97, 188, 109) if status_ok else (239, 127, 127)
+            bar_color = color_accent if status_ok else color_danger
             draw.rectangle((bar_x, base_y - bar_h, bar_x + bar_w, base_y), fill=bar_color)
             label = item["date"].strftime("%d.%m")
             label_w, label_h = text_bbox(draw, label, font_small)
-            draw.text((bar_x + (bar_w - label_w) / 2, base_y + int(4 * scale)), label, font=font_small, fill=(94, 102, 112))
+            draw.text((bar_x + (bar_w - label_w) / 2, base_y + int(4 * scale)), label, font=font_small, fill=color_muted2)
             value_label = fmt_money(float(item["total"]))
             value_w, value_h = text_bbox(draw, value_label, font_small)
             draw.text(
                 (bar_x + (bar_w - value_w) / 2, base_y - bar_h - value_h - int(4 * scale)),
                 value_label,
                 font=font_small,
-                fill=(28, 33, 39),
+                fill=color_text,
             )
             status_label = "✓" if status_ok else "✗"
-            status_color = (97, 188, 109) if status_ok else (239, 127, 127)
+            status_color = color_accent if status_ok else color_danger
             status_w, _ = text_bbox(draw, status_label, font_small)
             draw.text(
                 (bar_x + (bar_w - status_w) / 2, base_y - bar_h - value_h - int(18 * scale)),
@@ -5297,27 +5319,27 @@ def render_month_report_png(
         weekly_min = float(summary["weekly_min_needed"] or 0.0)
         if weekly_min > 0:
             line_y = base_y - int((min(weekly_min, max_total) / max_total) * (chart_h - int(40 * scale)))
-            draw.line((chart_x0, line_y, chart_x0 + chart_w, line_y), fill=(239, 127, 127), width=int(2 * scale))
+            draw.line((chart_x0, line_y, chart_x0 + chart_w, line_y), fill=color_warn, width=int(2 * scale))
             label = "МНСП"
-            draw.text((chart_x0 + int(4 * scale), line_y - int(18 * scale)), label, font=font_small, fill=(239, 127, 127))
+            draw.text((chart_x0 + int(4 * scale), line_y - int(18 * scale)), label, font=font_small, fill=color_warn)
 
     sub_table_x0 = right_x + int(18 * scale)
     sub_table_x1 = right_x + right_w - int(18 * scale)
     sub_table_y0 = chart_y0 + chart_h + int(30 * scale)
-    sub_table_y1 = section_y + content_h - int(16 * scale)
+    sub_table_y1 = section_y + top_h - int(16 * scale)
     if sub_table_y1 > sub_table_y0:
-        draw.text((sub_table_x0, sub_table_y0 - int(22 * scale)), "Доп. счета", font=font_section, fill=(28, 33, 39))
+        draw.text((sub_table_x0, sub_table_y0 - int(22 * scale)), "Доп. счета", font=font_section, fill=color_text)
         header_h = int(20 * scale)
         draw.rounded_rectangle(
             (sub_table_x0, sub_table_y0, sub_table_x1, sub_table_y0 + header_h),
             radius=int(8 * scale),
-            fill=(235, 238, 245),
+            fill=color_card2,
         )
         col_date_w = int((sub_table_x1 - sub_table_x0) * 0.3)
         col_w = (sub_table_x1 - sub_table_x0 - col_date_w) / 2
-        draw.text((sub_table_x0 + int(6 * scale), sub_table_y0 + int(2 * scale)), "Дата", font=font_small, fill=(58, 66, 76))
-        draw.text((sub_table_x0 + col_date_w + int(6 * scale), sub_table_y0 + int(2 * scale)), "Praise +", font=font_small, fill=(58, 66, 76))
-        draw.text((sub_table_x0 + col_date_w + col_w + int(6 * scale), sub_table_y0 + int(2 * scale)), "Alpha +", font=font_small, fill=(58, 66, 76))
+        draw.text((sub_table_x0 + int(6 * scale), sub_table_y0 + int(2 * scale)), "Дата", font=font_small, fill=color_muted)
+        draw.text((sub_table_x0 + col_date_w + int(6 * scale), sub_table_y0 + int(2 * scale)), "Praise +", font=font_small, fill=color_muted)
+        draw.text((sub_table_x0 + col_date_w + col_w + int(6 * scale), sub_table_y0 + int(2 * scale)), "Alpha +", font=font_small, fill=color_muted)
 
         sub_income: Dict[dt.date, Dict[str, float]] = {}
         for row in subaccount_services:
@@ -5337,7 +5359,7 @@ def render_month_report_png(
         row_h = int(18 * scale)
         y = sub_table_y0 + header_h + int(6 * scale)
         if not dates:
-            draw.text((sub_table_x0 + int(6 * scale), y), "Нет данных", font=font_small, fill=(120, 126, 136))
+            draw.text((sub_table_x0 + int(6 * scale), y), "Нет данных", font=font_small, fill=color_muted2)
             y += row_h
         else:
             for idx, date in enumerate(dates):
@@ -5345,23 +5367,89 @@ def render_month_report_png(
                     break
                 if idx % 2 == 0:
                     draw.rectangle((sub_table_x0, y - int(2 * scale), sub_table_x1, y + row_h - int(2 * scale)), fill=(248, 250, 253))
-                draw.text((sub_table_x0 + int(6 * scale), y), date.strftime("%d.%m"), font=font_small, fill=(42, 48, 56))
+                draw.text((sub_table_x0 + int(6 * scale), y), date.strftime("%d.%m"), font=font_small, fill=color_text)
                 praise = fmt_money(sub_income[date].get("praise", 0.0))
                 alpha = fmt_money(sub_income[date].get("alpha", 0.0))
-                draw.text((sub_table_x0 + col_date_w + int(6 * scale), y), praise, font=font_small, fill=(42, 48, 56))
-                draw.text((sub_table_x0 + col_date_w + col_w + int(6 * scale), y), alpha, font=font_small, fill=(42, 48, 56))
+                draw.text((sub_table_x0 + col_date_w + int(6 * scale), y), praise, font=font_small, fill=color_text)
+                draw.text((sub_table_x0 + col_date_w + col_w + int(6 * scale), y), alpha, font=font_small, fill=color_text)
                 y += row_h
         if y + row_h <= sub_table_y1:
-            draw.line((sub_table_x0, y, sub_table_x1, y), fill=(220, 224, 232), width=max(1, int(1 * scale)))
-            draw.text((sub_table_x0 + int(6 * scale), y + int(2 * scale)), "Расходы", font=font_small, fill=(94, 102, 112))
-            draw.text((sub_table_x0 + col_date_w + int(6 * scale), y + int(2 * scale)), fmt_money(sub_spend["praise"]), font=font_small, fill=(239, 127, 127))
-            draw.text((sub_table_x0 + col_date_w + col_w + int(6 * scale), y + int(2 * scale)), fmt_money(sub_spend["alpha"]), font=font_small, fill=(239, 127, 127))
+            draw.line((sub_table_x0, y, sub_table_x1, y), fill=color_stroke, width=max(1, int(1 * scale)))
+            draw.text((sub_table_x0 + int(6 * scale), y + int(2 * scale)), "Расходы", font=font_small, fill=color_muted)
+            draw.text((sub_table_x0 + col_date_w + int(6 * scale), y + int(2 * scale)), fmt_money(sub_spend["praise"]), font=font_small, fill=color_danger)
+            draw.text((sub_table_x0 + col_date_w + col_w + int(6 * scale), y + int(2 * scale)), fmt_money(sub_spend["alpha"]), font=font_small, fill=color_danger)
+
+    list_card_y = section_y + top_h + gap
+    list_card = (margin, list_card_y, w - margin, list_card_y + list_card_h)
+    draw_card(draw, list_card, radius, color_card, shadow=color_shadow)
+    draw.text(
+        (margin + int(18 * scale), list_card_y + int(16 * scale)),
+        "Все расходы",
+        font=font_section,
+        fill=color_text,
+    )
+
+    def truncate_text(text: str, max_width: int, font: Any) -> str:
+        if text_bbox(draw, text, font)[0] <= max_width:
+            return text
+        ellipsis = "…"
+        for i in range(len(text), 0, -1):
+            candidate = text[:i] + ellipsis
+            if text_bbox(draw, candidate, font)[0] <= max_width:
+                return candidate
+        return ellipsis
+
+    expense_items: List[str] = []
+    for row in expenses:
+        date = dt.date.fromisoformat(row["expense_date"]).strftime("%d.%m")
+        category = str(row["category"] or "—")
+        title = str(row["title"] or "—")
+        total = fmt_money(float(row["total"] or 0.0))
+        expense_items.append(f"{date} • {category}: {title} — {total}")
+
+    list_x0 = margin + int(18 * scale)
+    list_x1 = w - margin - int(18 * scale)
+    list_y0 = list_card_y + int(52 * scale)
+    list_y1 = list_card[3] - int(16 * scale)
+    list_header_h = int(20 * scale)
+    draw.rounded_rectangle(
+        (list_x0, list_y0, list_x1, list_y0 + list_header_h),
+        radius=int(8 * scale),
+        fill=color_card2,
+    )
+    draw.text(
+        (list_x0 + int(8 * scale), list_y0 + int(2 * scale)),
+        "Дата • Категория • Описание • Сумма",
+        font=font_small,
+        fill=color_muted,
+    )
+
+    line_h = int(16 * scale)
+    list_area_h = list_y1 - list_y0 - list_header_h - int(6 * scale)
+    max_lines = max(int(list_area_h / line_h), 1)
+    columns = max(1, math.ceil(len(expense_items) / max_lines))
+    column_w = (list_x1 - list_x0) / columns
+    for col in range(columns):
+        col_x = list_x0 + col * column_w
+        if col > 0:
+            draw.line(
+                (col_x, list_y0 + list_header_h, col_x, list_y1),
+                fill=color_stroke,
+                width=max(1, int(1 * scale)),
+            )
+        for row_idx in range(max_lines):
+            item_idx = col * max_lines + row_idx
+            if item_idx >= len(expense_items):
+                break
+            y = list_y0 + list_header_h + int(6 * scale) + row_idx * line_h
+            text = truncate_text(expense_items[item_idx], int(column_w - int(8 * scale)), font_small)
+            draw.text((col_x + int(6 * scale), y), text, font=font_small, fill=color_text)
 
     tz = CFG.tzinfo()
     now = dt.datetime.now(tz)
     tz_name = now.tzname() or CFG.TZ
     footer_text = f"Сформировано: {now.strftime('%d.%m.%Y %H:%M')} ({tz_name})"
-    draw.text((margin, h - footer_h), footer_text, font=font_small, fill=(120, 126, 136))
+    draw.text((margin, h - footer_h), footer_text, font=font_small, fill=color_muted2)
 
     out = io.BytesIO()
     bg.save(out, format="PNG")
