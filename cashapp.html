@@ -39,25 +39,31 @@
     }
 
     [data-theme="light"]{
-      --bg:#f4f6fa;
+      --bg:#f8fafc;
       --card:#ffffff;
-      --card2:#eef2f7;
+      --card2:#f1f5f9;
       --text:#0f172a;
-      --muted:#4b5563;
-      --muted2:#6b7280;
-      --line:rgba(15,23,42,.10);
-      --shadow: 0 10px 24px rgba(15,23,42,.10);
-      --primary:#10b981;
-      --primary2:#15b981;
+      --muted:#475569;
+      --muted2:#64748b;
+      --line:rgba(15,23,42,.08);
+      --shadow: 0 16px 30px rgba(15,23,42,.10);
+      --primary:#0ea5e9;
+      --primary2:#38bdf8;
       --danger:#ef4444;
       --warn:#f59e0b;
 
-      --overlay: rgba(255,255,255,.60);
-      --overlay2: rgba(15,23,42,.22);
+      --overlay: rgba(248,250,252,.72);
+      --overlay2: rgba(15,23,42,.20);
 
       --tap: rgba(15,23,42,.06);
-      --signature-bg: #f8fafc;
-      --signature-stroke: #0000ff;
+      --signature-bg: #ffffff;
+      --signature-stroke: #0f172a;
+    }
+
+    [data-theme="light"] body{
+      background: radial-gradient(900px 600px at 10% -10%, rgba(56,189,248,.22), transparent 60%),
+                  radial-gradient(900px 600px at 100% 0%, rgba(16,185,129,.12), transparent 62%),
+                  var(--bg);
     }
 
     .material-symbols-rounded{
@@ -154,6 +160,31 @@
       -webkit-tap-highlight-color: transparent;
     }
     .iconBtn:active{ transform: scale(.98); background: var(--tap); }
+
+    .themePill{
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: var(--card2);
+      color: var(--text);
+      font-weight: 800;
+      font-size: 12px;
+      letter-spacing: .2px;
+      cursor:pointer;
+      user-select:none;
+      -webkit-tap-highlight-color: transparent;
+      box-shadow: var(--shadow);
+      transition: transform .12s ease, background .12s ease, color .12s ease;
+    }
+    .themePill.active{
+      background: linear-gradient(180deg, var(--primary), var(--primary2));
+      color: #fff;
+      border-color: transparent;
+    }
+    .themePill:active{ transform: scale(.98); background: var(--tap); }
 
     .card{
       background: var(--card);
@@ -520,6 +551,10 @@
         </div>
       </div>
       <div class="actions">
+        <button id="lightThemeBtn" class="themePill" type="button" title="Светлая тема">
+          <span class="material-symbols-rounded">light_mode</span>
+          Светлая
+        </button>
         <button id="themeBtn" class="iconBtn" type="button" title="Тема">
           <span class="material-symbols-rounded" id="themeIcon">dark_mode</span>
         </button>
@@ -711,6 +746,13 @@
       const ic = document.getElementById("themeIcon");
       if (ic) ic.textContent = (theme === "dark") ? "dark_mode" : "light_mode";
 
+      const lightBtn = document.getElementById("lightThemeBtn");
+      if (lightBtn){
+        const isLightMode = ThemeState.mode === "light";
+        lightBtn.classList.toggle("active", isLightMode);
+        lightBtn.setAttribute("aria-pressed", isLightMode ? "true" : "false");
+      }
+
       updateSignatureStyle();
     }
 
@@ -886,6 +928,11 @@
       if (!btn) return;
       btn.disabled = !ready;
       btn.setAttribute("aria-disabled", ready ? "false" : "true");
+    }
+
+    function syncSignatureReady(){
+      if (!Pad) return;
+      updateSignatureReady(!!(Pad.hasInk && Pad.moved));
     }
 
 
@@ -1180,8 +1227,8 @@
       markInk(){
         if (!this.hasInk){
           this.hasInk = true;
-          updateSignatureReady(true);
         }
+        syncSignatureReady();
       }
     };
 
@@ -1311,7 +1358,7 @@
     async function signCurrent(){
       const id = State.currentId;
       if (!id) return;
-      if (!Pad.hasInk){
+      if (!Pad.hasInk || !Pad.moved){
         toast("Нарисуйте подпись перед отправкой");
         return;
       }
@@ -1420,6 +1467,9 @@
     $("themeBtn").addEventListener("click", ()=>{
       const curTheme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
       applyTheme(curTheme === "dark" ? "light" : "dark");
+    });
+    $("lightThemeBtn").addEventListener("click", ()=>{
+      applyTheme("light");
     });
 
     (async function init(){
