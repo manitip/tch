@@ -4987,7 +4987,9 @@ def require_pillow() -> Tuple[Any, Any, Any]:
 
 
 def load_ttf_font(image_font: Any, size: int, bold: bool = False) -> Any:
+    local_menlo = Path(__file__).with_name("Menlo.ttf")
     font_candidates = [
+        str(local_menlo),
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
         "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf" if bold else "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
