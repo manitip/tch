@@ -4989,18 +4989,26 @@ def require_pillow() -> Tuple[Any, Any, Any]:
 
 def load_ttf_font(image_font: Any, size: int, bold: bool = False) -> Any:
     """
-    Пытаемся грузить красивый UI-шрифт (Inter, если положишь рядом),
+    Пытаемся грузить красивый UI-шрифт (Menlo/Inter, если положишь рядом),
     иначе системные DejaVu/Liberation.
     """
     base_dir = Path(__file__).resolve().parent
 
     local_candidates = [
+        base_dir / ("Menlo-Bold.ttf" if bold else "Menlo-Regular.ttf"),
+        base_dir / "Menlo.ttf",
         base_dir / ("Inter-Bold.ttf" if bold else "Inter-Regular.ttf"),
         base_dir / ("Inter-SemiBold.ttf" if bold else "Inter-Regular.ttf"),
         base_dir / ("SF-Pro-Display-Bold.ttf" if bold else "SF-Pro-Display-Regular.ttf"),
     ]
 
     sys_candidates = [
+        "/Library/Fonts/Menlo.ttc",
+        "/Library/Fonts/Menlo.ttf",
+        "/System/Library/Fonts/Menlo.ttc",
+        "/System/Library/Fonts/Menlo.ttf",
+        "/usr/share/fonts/truetype/menlo/Menlo-Bold.ttf" if bold else "/usr/share/fonts/truetype/menlo/Menlo-Regular.ttf",
+        "/usr/share/fonts/truetype/menlo/Menlo.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
         "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf" if bold else "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
