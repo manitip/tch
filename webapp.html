@@ -1565,45 +1565,67 @@
       color: rgba(16,185,129,.95);
     }
 
-    .cashflowActTable{
-      width: 100%;
-      border-collapse: collapse;
-      table-layout: fixed;
-      min-width: 520px;
-      font-size: 13px;
+    .cashflowActList{
+      display:flex;
+      flex-direction:column;
+      gap: 12px;
     }
-    .cashflowActTable th,
-    .cashflowActTable td{
-      padding: 10px 8px;
-      border-bottom: 1px solid var(--stroke);
-      text-align: left;
-      vertical-align: top;
+    .actCard{
+      background: var(--card);
+      border: 1px solid var(--stroke);
+      border-radius: 16px;
+      padding: 12px;
+      box-shadow: var(--shadow);
+      display:flex;
+      flex-direction:column;
+      gap: 8px;
     }
-    .cashflowActTable th{
-      color: var(--muted);
+    .actHeader{
+      display:flex;
+      justify-content:space-between;
+      gap: 12px;
+      align-items:flex-start;
+    }
+    .actTitle{
+      display:flex;
+      flex-direction:column;
+      gap: 4px;
+      min-width: 0;
+    }
+    .actTitle .actOp{
+      font-weight: 700;
+      font-size: 14px;
+      color: var(--text);
+    }
+    .actTitle .actMeta{
+      display:flex;
+      flex-wrap:wrap;
+      gap: 6px;
+      color: var(--muted2);
+      font-size: 12px;
+    }
+    .actAmount{
+      font-size: 16px;
       font-weight: 700;
       white-space: nowrap;
     }
-    .cashflowActTable td{
-      color: var(--text);
-      white-space: nowrap;
-    }
-    .cashflowActTable td:nth-child(3),
-    .cashflowActTable td:nth-child(4),
-    .cashflowActTable td:nth-child(5),
-    .cashflowActTable td:nth-child(6){
-      white-space: normal;
-      word-break: break-word;
-    }
-    .cashflowActTable th:nth-child(2),
-    .cashflowActTable td:nth-child(2){
-      text-align: right;
-    }
-    .sigCell{
+    .actPerson{
       display:flex;
       flex-direction:column;
-      gap: 6px;
-      align-items:flex-start;
+      gap: 2px;
+    }
+    .actPerson .name{
+      font-weight: 600;
+    }
+    .actPerson .role{
+      font-size: 12px;
+      color: var(--muted2);
+    }
+    .actSignature{
+      display:flex;
+      flex-wrap:wrap;
+      align-items:center;
+      gap: 8px;
     }
     .sigImage{
       width: 120px;
@@ -2957,24 +2979,21 @@
                         </button>
                       </div>
                       <div class="spacer12"></div>
-                      <div style="overflow:auto;">
-                        <table class="cashflowActTable">
-                          <thead>
-                            <tr>
-                              <th>Дата</th>
-                              <th>Операция</th>
-                              <th>Сумма</th>
-                              <th>ФИО</th>
-                              <th>Тип пользователя</th>
-                              <th>Подпись</th>
-                            </tr>
-                          </thead>
-                          <tbody id="cashflowActBody">
-                            <tr><td colspan="6" class="muted2">Нет данных.</td></tr>
-                          </tbody>
-                        </table>
-
-                      </div>
+                      <div id="cashflowActList" class="cashflowActList"></div>
+                      <div id="cashflowActEmpty" class="tiny muted2">Нет данных.</div>
+                      <table class="cashflowActTable hidden" aria-hidden="true">
+                        <thead>
+                          <tr>
+                            <th>Дата</th>
+                            <th>Операция</th>
+                            <th>Сумма</th>
+                            <th>ФИО</th>
+                            <th>Тип пользователя</th>
+                            <th>Подпись</th>
+                          </tr>
+                        </thead>
+                        <tbody id="cashflowActBody"></tbody>
+                      </table>
                     </div>
                   </div>
                 </div>
@@ -7087,15 +7106,18 @@
       const q = new URLSearchParams();
       if (account) q.set("account", account);
       const data = await API.get(`/api/cashflow/withdraw-act?${q.toString()}`);
+      const list = $("#cashflowActList");
+      const empty = $("#cashflowActEmpty");
       const body = $("#cashflowActBody");
-      if (!body) return;
+      if (!list || !empty) return;
       const items = data.items || [];
-      body.innerHTML = "";
+      list.innerHTML = "";
+      if (body) body.innerHTML = "";
       CashflowState.signatureUrls?.forEach((url)=> URL.revokeObjectURL(url));
       CashflowState.signatureUrls = [];
-      if (!items.length){
+      empty.classList.toggle("hidden", items.length > 0);
+      if (body && !items.length){
         body.innerHTML = `<tr><td colspan="6" class="muted2">Нет данных.</td></tr>`;
-        return;
       }
       const makeBadge = (text, tone)=>{
         const span = document.createElement("span");
@@ -7111,44 +7133,84 @@
         const fio = r.fio || r.name_snapshot || "";
         const userType = r.user_type || r.role_snapshot || "";
         const op = fmtCashflowOp(r.op_type || "");
-        const tr = document.createElement("tr");
+        const card = document.createElement("div");
+        card.className = "actCard";
 
-        const sigCell = document.createElement("td");
-        sigCell.className = "sigCell";
+        const header = document.createElement("div");
+        header.className = "actHeader";
+
+        const title = document.createElement("div");
+        title.className = "actTitle";
+        title.innerHTML = `
+          <div class="actOp">${escapeHtml(op)}</div>
+          <div class="actMeta">
+            <span>${escapeHtml(date)}</span>
+          </div>
+        `;
+
+        const amount = document.createElement("div");
+        amount.className = "actAmount";
+        amount.textContent = `${Number(r.amount || 0).toFixed(2)}`;
+
+        header.appendChild(title);
+        header.appendChild(amount);
+        card.appendChild(header);
+
+        const person = document.createElement("div");
+        person.className = "actPerson";
+        person.innerHTML = `
+          <div class="name">${escapeHtml(fio || "—")}</div>
+          <div class="role">${escapeHtml(userType || "—")}</div>
+        `;
+        card.appendChild(person);
+
+        const signature = document.createElement("div");
+        signature.className = "actSignature";
 
         if (sigIsRefuse){
-          sigCell.appendChild(makeBadge(sigValue, "bad"));
+          signature.appendChild(makeBadge(sigValue, "bad"));
         } else if (hasImage){
           const img = document.createElement("img");
           img.className = "sigImage";
           img.alt = "Подпись";
           img.loading = "lazy";
-          sigCell.appendChild(img);
-          sigCell.appendChild(makeBadge("Подписано", "ok"));
+          signature.appendChild(img);
+          signature.appendChild(makeBadge("Подписано", "ok"));
           try{
             const blob = await API.getBlob(`/api/cashflow/requests/${r.request_id}/participants/${r.participant_telegram_id}/signature.png`);
             const url = URL.createObjectURL(blob);
             CashflowState.signatureUrls.push(url);
             img.src = url;
           }catch{
-            sigCell.appendChild(makeBadge("Подпись не найдена", "warn"));
+            signature.appendChild(makeBadge("Подпись не найдена", "warn"));
           }
         } else if (sigValue){
           const text = sigValue === "SIGNED" ? "Подписано" : sigValue;
-          sigCell.appendChild(makeBadge(text, sigValue === "SIGNED" ? "ok" : "warn"));
+          signature.appendChild(makeBadge(text, sigValue === "SIGNED" ? "ok" : "warn"));
         } else {
-          sigCell.appendChild(makeBadge("Ожидает подписи", "warn"));
+          signature.appendChild(makeBadge("Ожидает подписи", "warn"));
         }
 
-        tr.innerHTML = `
-          <td>${escapeHtml(date)}</td>
-          <td>${escapeHtml(op)}</td>
-          <td>${Number(r.amount || 0).toFixed(2)}</td>
-          <td>${escapeHtml(fio)}</td>
-          <td>${escapeHtml(userType)}</td>
-        `;
-        tr.appendChild(sigCell);
-        body.appendChild(tr);
+        card.appendChild(signature);
+        list.appendChild(card);
+
+        if (body) {
+          const tr = document.createElement("tr");
+          const sigCell = document.createElement("td");
+          sigCell.className = "sigCell";
+          signature.querySelectorAll(".badge, img").forEach((node)=>{
+            sigCell.appendChild(node.cloneNode(true));
+          });
+          tr.innerHTML = `
+            <td>${escapeHtml(date)}</td>
+            <td>${escapeHtml(op)}</td>
+            <td>${Number(r.amount || 0).toFixed(2)}</td>
+            <td>${escapeHtml(fio)}</td>
+            <td>${escapeHtml(userType)}</td>
+          `;
+          tr.appendChild(sigCell);
+          body.appendChild(tr);
+        }
       }
     }
 
