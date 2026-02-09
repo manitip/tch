@@ -3267,11 +3267,16 @@
                   <div class="sectionHeader"><h3>Пользователи</h3></div>
                   <div class="card bigCard">
                     <div class="tiny muted2">
-                      Управление доступом выполняется через базу данных (логины и роли).
-                      Для изменений обратитесь к администратору.
+                      Управление доступом выполняется через логины и роли пользователей.
+                      Новые заявки на регистрацию требуют подтверждения администратора.
                     </div>
                     <div class="spacer12"></div>
                     <div id="usersList" class="list"></div>
+                  </div>
+                  <div class="card bigCard" id="registrationRequestsCard">
+                    <div class="tiny muted2">Заявки на регистрацию (ожидают подтверждения)</div>
+                    <div class="spacer12"></div>
+                    <div id="registrationRequestsList" class="list"></div>
                   </div>
                 </div>
               </div>
@@ -3777,7 +3782,6 @@
       },
       async authRegister(payload){
         const data = await API.post("/api/auth/register", payload);
-        API.setSession(data);
         return data;
       },
       async authBootstrap(payload, secret){
@@ -3925,6 +3929,7 @@
         bootstrap_secret_not_configured: "Секрет администратора не задан на сервере (ADMIN_BOOTSTRAP_SECRET).",
         invalid_bootstrap_secret: "Неверный секрет администратора.",
         login_already_exists: "Логин уже занят. Выберите другой.",
+        registration_pending: "Заявка уже отправлена. Ожидайте подтверждения администратора.",
         user_inactive: "Пользователь отключён. Обратитесь к администратору.",
       };
       if (map[normalized]) return map[normalized];
@@ -4057,8 +4062,13 @@
           submitBtn.textContent = "Проверяем…";
         }
         if (AuthGateState.mode === "register"){
-          await API.authRegister({ login, password, name: name || undefined });
-        } else if (AuthGateState.mode === "bootstrap"){
+          const res = await API.authRegister({ login, password, name: name || undefined });
+          const msg = res?.message || "Заявка отправлена. Ожидайте подтверждения администратора.";
+          setAuthError(msg);
+          setAuthMode("login");
+          return;
+        }
+        if (AuthGateState.mode === "bootstrap"){
           if (!secret){
             setAuthError("Введите секрет администратора.");
             return;
@@ -4130,6 +4140,7 @@
       historyTags: [],
       historyTagMode: "any",
       users: [],
+      registrationRequests: [],
       monitorTab: "errors",
       monitorOverview: null,
       monitorTab: "errors",
@@ -7808,14 +7819,52 @@
         const team = escapeHtml(u.team || "—");
         const role = escapeHtml(u.role || "—");
         const login = escapeHtml(u.login || "—");
-        const telegramId = escapeHtml(String(u.telegram_id || "—"));
         const activeFlag = (u.is_active ?? u.active) ? true : false;
         const active = activeFlag ? "Активен" : "Отключён";
-                <div class="tiny muted2">Telegram ID: ${telegramId}</div>
+        return `
+          <div class="card bigCard">
+            <div class="row" style="justify-content:space-between; gap:12px;">
+              <div>
+                <div class="h">${name}</div>
                 <div class="tiny muted2">Логин: ${login} • Тим: ${team}</div>
               </div>
               <div class="chip">${role}</div>
               <div class="tiny muted2">${active}</div>
+            </div>
+          </div>
+        `;
+      }).join("");
+    }
+
+    function renderRegistrationRequests(){
+      const list = $("#registrationRequestsList");
+      if (!list) return;
+      const items = State.registrationRequests || [];
+      if (!items.length){
+        list.innerHTML = `<div class="card bigCard"><div class="tiny muted2">Заявок на регистрацию нет.</div></div>`;
+        return;
+      }
+      list.innerHTML = items.map((r)=>{
+        const name = escapeHtml(r.name || "—");
+        const login = escapeHtml(r.login || "—");
+        const team = escapeHtml(r.team || "—");
+        const created = escapeHtml(String(r.created_at || "").replace("T", " ").replace("Z", ""));
+        return `
+          <div class="card bigCard">
+            <div class="row" style="justify-content:space-between; gap:12px; align-items:center;">
+              <div>
+                <div class="h">${name}</div>
+                <div class="tiny muted2">Логин: ${login} • Тим: ${team}</div>
+                <div class="tiny muted2">Создано: ${created || "—"}</div>
+              </div>
+              <div class="row" style="gap:8px; flex-wrap:wrap;">
+                <button class="btn small" type="button" data-registration-action="approve" data-registration-id="${r.id}">
+                  Одобрить
+                </button>
+                <button class="btn small ghost" type="button" data-registration-action="reject" data-registration-id="${r.id}">
+                  Отклонить
+                </button>
+              </div>
             </div>
           </div>
         `;
@@ -7834,6 +7883,21 @@
         const list = $("#usersList");
         if (list){
           list.innerHTML = `<div class="card bigCard"><div class="tiny muted2">Не удалось загрузить список пользователей.</div></div>`;
+        }
+      }
+    }
+
+    async function loadRegistrationRequests(){
+      if (State.role !== "admin") return;
+      try{
+        const res = await API.get("/api/admin/registration-requests?status=pending");
+        State.registrationRequests = res.items || [];
+        renderRegistrationRequests();
+      }catch(e){
+        State.registrationRequests = [];
+        const list = $("#registrationRequestsList");
+        if (list){
+          list.innerHTML = `<div class="card bigCard"><div class="tiny muted2">Не удалось загрузить заявки.</div></div>`;
         }
       }
     }
@@ -8476,6 +8540,28 @@
       });
       $("#authBootstrapBtn").addEventListener("click", ()=> setAuthMode("bootstrap"));
       $("#authBackBtn").addEventListener("click", ()=> setAuthMode("login"));
+      $("#registrationRequestsList")?.addEventListener("click", async (e)=>{
+        const btn = e.target.closest("button[data-registration-action]");
+        if (!btn) return;
+        const action = btn.dataset.registrationAction;
+        const requestId = btn.dataset.registrationId;
+        if (!requestId) return;
+        if (action === "reject"){
+          const ok = confirm("Отклонить заявку на регистрацию?");
+          if (!ok) return;
+        }
+        btn.disabled = true;
+        try{
+          await API.post(`/api/admin/registration-requests/${requestId}/${action}`);
+          await loadRegistrationRequests();
+          await loadUsers();
+          setToast(action === "approve" ? "Заявка одобрена" : "Заявка отклонена");
+        }catch(err){
+          setToast("Не удалось обработать заявку");
+        }finally{
+          btn.disabled = false;
+        }
+      });
 
       // nav
       $$(".navBtn").forEach(btn=>{

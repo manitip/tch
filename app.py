@@ -458,7 +458,7 @@ def ensure_user_auth_fields() -> None:
     for row in rows:
         login = str(row["login"] or "").strip()
         if not login:
-            login = f"tg_{row['telegram_id']}"
+            login = f"user_{row['id']}"
         password_hash = str(row["password_hash"] or "").strip()
         if not password_hash:
             password_hash = hash_password(secrets.token_urlsafe(12))
@@ -2440,6 +2440,11 @@ class AuthRegisterIn(BaseModel):
     name: Optional[str] = None
 
 
+class AuthRegisterOut(BaseModel):
+    status: str
+    message: str
+
+
 class AuthBootstrapIn(BaseModel):
     login: str
     password: str
@@ -2468,6 +2473,22 @@ class AdminUserUpdateIn(BaseModel):
 class AdminResetPasswordIn(BaseModel):
     password: str
 
+
+class AdminRegistrationDecisionOut(BaseModel):
+    status: str
+    user_id: Optional[int] = None
+
+
+class AdminRegistrationRequestOut(BaseModel):
+    id: int
+    login: str
+    name: Optional[str] = None
+    team: Optional[str] = None
+    role: str
+    status: str
+    created_at: str
+    reviewed_at: Optional[str] = None
+    reviewed_by_user_id: Optional[int] = None
 
 
 class MagicCreateIn(BaseModel):
@@ -2602,7 +2623,7 @@ def admin_exists() -> bool:
     return bool(row)
 
 def has_registered_web_users() -> bool:
-    row = db_fetchone("SELECT id FROM users WHERE login NOT LIKE 'tg_%' LIMIT 1;")
+    row = db_fetchone("SELECT id FROM users LIMIT 1;")
     return bool(row)
 
 def create_user(
@@ -2646,6 +2667,118 @@ def create_user(
     if not row:
         raise HTTPException(status_code=500, detail="user_create_failed")
     return row
+
+
+def create_registration_request(
+    *,
+    login: str,
+    password: str,
+    name: Optional[str] = None,
+    team: Optional[str] = None,
+) -> sqlite3.Row:
+    login_norm = normalize_login(login)
+    validate_login(login_norm)
+    validate_password(password)
+
+    if db_fetchone("SELECT id FROM users WHERE login=?;", (login_norm,)):
+        raise HTTPException(status_code=409, detail="login_already_exists")
+
+    existing = db_fetchone(
+        "SELECT id, status FROM registration_requests WHERE login=?;",
+        (login_norm,),
+    )
+    if existing:
+        if str(existing["status"]) == "pending":
+            raise HTTPException(status_code=409, detail="registration_pending")
+        raise HTTPException(status_code=409, detail="login_already_exists")
+
+    now = iso_now(CFG.tzinfo())
+    password_hash = hash_password(password)
+    try:
+        request_id = db_exec_returning_id(
+            """
+            INSERT INTO registration_requests (
+                login, password_hash, name, team, role,
+                status, created_at
+            ) VALUES (?, ?, ?, ?, ?, 'pending', ?);
+            """,
+            (
+                login_norm,
+                password_hash,
+                (name or "").strip() or None,
+                (team or "").strip() or None,
+                "viewer",
+                now,
+            ),
+        )
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=409, detail="login_already_exists")
+    row = db_fetchone("SELECT * FROM registration_requests WHERE id=?;", (int(request_id),))
+    if not row:
+        raise HTTPException(status_code=500, detail="registration_create_failed")
+    return row
+
+
+def approve_registration_request(request_id: int, reviewer_id: int) -> sqlite3.Row:
+    row = db_fetchone("SELECT * FROM registration_requests WHERE id=?;", (int(request_id),))
+    if not row:
+        raise HTTPException(status_code=404, detail="registration_not_found")
+    if str(row["status"]) != "pending":
+        raise HTTPException(status_code=409, detail="registration_already_reviewed")
+
+    now = iso_now(CFG.tzinfo())
+    telegram_id = next_virtual_telegram_id()
+    try:
+        user_id = db_exec_returning_id(
+            """
+            INSERT INTO users (
+                telegram_id, login, password_hash, name, team,
+                role, is_active, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?);
+            """,
+            (
+                int(telegram_id),
+                row["login"],
+                row["password_hash"],
+                row["name"],
+                row["team"],
+                row["role"],
+                now,
+                now,
+            ),
+        )
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=409, detail="login_already_exists")
+
+    db_exec(
+        """
+        UPDATE registration_requests
+        SET status='approved', reviewed_at=?, reviewed_by_user_id=?
+        WHERE id=?;
+        """,
+        (now, int(reviewer_id), int(request_id)),
+    )
+    created = db_fetchone("SELECT * FROM users WHERE id=?;", (int(user_id),))
+    if not created:
+        raise HTTPException(status_code=500, detail="user_create_failed")
+    return created
+
+
+def reject_registration_request(request_id: int, reviewer_id: int) -> None:
+    row = db_fetchone("SELECT * FROM registration_requests WHERE id=?;", (int(request_id),))
+    if not row:
+        raise HTTPException(status_code=404, detail="registration_not_found")
+    if str(row["status"]) != "pending":
+        raise HTTPException(status_code=409, detail="registration_already_reviewed")
+    now = iso_now(CFG.tzinfo())
+    db_exec(
+        """
+        UPDATE registration_requests
+        SET status='rejected', reviewed_at=?, reviewed_by_user_id=?
+        WHERE id=?;
+        """,
+        (now, int(reviewer_id), int(request_id)),
+    )
 
 
 
@@ -4234,20 +4367,18 @@ def auth_login(body: AuthLoginIn, request: Request):
     return make_auth_response(row)
 
 
-@APP.post("/api/auth/register", response_model=AuthOut, status_code=201)
+@APP.post("/api/auth/register", response_model=AuthRegisterOut, status_code=202)
 def auth_register(body: AuthRegisterIn, request: Request):
-    login_norm = normalize_login(body.login)
-    validate_login(login_norm)
-    validate_password(body.password)
-
-    row = create_user(
-        login=login_norm,
+    row = create_registration_request(
+        login=body.login,
         password=body.password,
-        role="viewer",
         name=body.name,
     )
-    log_auth_event("register", login_norm, request, "success", user_id=int(row["id"]))
-    return make_auth_response(row)
+    log_auth_event("register_request", str(row["login"]), request, "success")
+    return {
+        "status": "pending",
+        "message": "Заявка отправлена. Дождитесь подтверждения администратора.",
+    }
 
 
 @APP.get("/api/auth/bootstrap/status")
@@ -4311,6 +4442,61 @@ def list_users(u: sqlite3.Row = Depends(require_role("admin"))):
         """
     )
     return {"items": [dict(r) for r in rows]}
+
+
+@APP.get("/api/admin/registration-requests")
+def list_registration_requests(
+    status: Optional[str] = Query(None),
+    u: sqlite3.Row = Depends(require_role("admin")),
+):
+    where = ""
+    params: Tuple[Any, ...] = ()
+    if status:
+        where = "WHERE status=?"
+        params = (str(status),)
+    rows = db_fetchall(
+        f"""
+        SELECT id, login, name, team, role, status, created_at, reviewed_at, reviewed_by_user_id
+        FROM registration_requests
+        {where}
+        ORDER BY created_at DESC;
+        """,
+        params,
+    )
+    return {"items": [dict(r) for r in rows]}
+
+
+@APP.post("/api/admin/registration-requests/{request_id}/approve", response_model=AdminRegistrationDecisionOut)
+def approve_registration_request_endpoint(
+    request_id: int,
+    request: Request,
+    u: sqlite3.Row = Depends(require_role("admin")),
+):
+    created = approve_registration_request(int(request_id), int(u["id"]))
+    log_auth_event(
+        "registration_approve",
+        str(created["login"]),
+        request,
+        "success",
+        user_id=int(created["id"]),
+    )
+    return {"status": "approved", "user_id": int(created["id"])}
+
+
+@APP.post("/api/admin/registration-requests/{request_id}/reject", response_model=AdminRegistrationDecisionOut)
+def reject_registration_request_endpoint(
+    request_id: int,
+    request: Request,
+    u: sqlite3.Row = Depends(require_role("admin")),
+):
+    reject_registration_request(int(request_id), int(u["id"]))
+    log_auth_event(
+        "registration_reject",
+        str(request_id),
+        request,
+        "success",
+    )
+    return {"status": "rejected", "user_id": None}
 
 
 @APP.post("/api/admin/users", status_code=201)
