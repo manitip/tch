@@ -13,6 +13,7 @@ import hmac
 import importlib.util
 import io
 import json
+import math
 import os
 import re
 import secrets
@@ -5028,6 +5029,9 @@ def render_month_report_png(
     summary: Dict[str, Any],
     services: List[sqlite3.Row],
     top_categories: List[Dict[str, Any]],
+    expenses: List[sqlite3.Row],
+    subaccount_services: List[sqlite3.Row],
+    subaccount_expenses: List[sqlite3.Row],
     preset: str,
 ) -> bytes:
     Image, ImageDraw, ImageFont = require_pillow()
@@ -5079,7 +5083,7 @@ def render_month_report_png(
     left_x = margin
     right_x = left_x + left_w + gap
 
-    plan_h = int(170 * scale)
+    plan_h = int(210 * scale)
     plan_card = (left_x, section_y, left_x + left_w, section_y + plan_h)
     draw_card(draw, plan_card, radius, (255, 255, 255))
     draw.text((left_x + int(18 * scale), section_y + int(16 * scale)), "План/цели", font=font_section, fill=(28, 33, 39))
@@ -5091,7 +5095,8 @@ def render_month_report_png(
         ("МНСП", fmt_money(float(summary["monthly_min_needed"]))),
         ("Выполнение МНСП", completion),
         ("СДДР", fmt_money(float(summary["sddr"]))),
-        ("ПСДПМ", psdpm_text),
+        ("К прошлому месяцу", psdpm_text),
+        ("Среднее пожертвование", fmt_money(float(summary["avg_sunday"]))),
     ]
     plan_y = section_y + int(55 * scale)
     for idx, (label, value) in enumerate(plan_items):
@@ -5163,6 +5168,63 @@ def render_month_report_png(
             fill=(28, 33, 39),
         )
 
+    list_x0 = legend_x
+    list_x1 = left_x + left_w - int(18 * scale)
+    list_y0 = pie_top + int(120 * scale)
+    list_y1 = expenses_card[3] - int(16 * scale)
+    list_header_h = int(20 * scale)
+    if list_y1 > list_y0 + list_header_h:
+        draw.rounded_rectangle(
+            (list_x0, list_y0, list_x1, list_y0 + list_header_h),
+            radius=int(8 * scale),
+            fill=(235, 238, 245),
+        )
+        draw.text(
+            (list_x0 + int(8 * scale), list_y0 + int(2 * scale)),
+            "Все расходы",
+            font=font_small,
+            fill=(58, 66, 76),
+        )
+
+        def truncate_text(text: str, max_width: int, font: Any) -> str:
+            if text_bbox(draw, text, font)[0] <= max_width:
+                return text
+            ellipsis = "…"
+            for i in range(len(text), 0, -1):
+                candidate = text[:i] + ellipsis
+                if text_bbox(draw, candidate, font)[0] <= max_width:
+                    return candidate
+            return ellipsis
+
+        expense_items: List[str] = []
+        for row in expenses:
+            date = dt.date.fromisoformat(row["expense_date"]).strftime("%d.%m")
+            category = str(row["category"] or "—")
+            title = str(row["title"] or "—")
+            total = fmt_money(float(row["total"] or 0.0))
+            expense_items.append(f"{date} {category}: {title} — {total}")
+
+        line_h = int(16 * scale)
+        list_area_h = list_y1 - list_y0 - list_header_h - int(6 * scale)
+        max_lines = max(int(list_area_h / line_h), 1)
+        columns = max(1, math.ceil(len(expense_items) / max_lines))
+        column_w = (list_x1 - list_x0) / columns
+        for col in range(columns):
+            col_x = list_x0 + col * column_w
+            if col > 0:
+                draw.line(
+                    (col_x, list_y0 + list_header_h, col_x, list_y1),
+                    fill=(228, 232, 240),
+                    width=max(1, int(1 * scale)),
+                )
+            for row_idx in range(max_lines):
+                item_idx = col * max_lines + row_idx
+                if item_idx >= len(expense_items):
+                    break
+                y = list_y0 + list_header_h + int(6 * scale) + row_idx * line_h
+                text = truncate_text(expense_items[item_idx], int(column_w - int(8 * scale)), font_small)
+                draw.text((col_x + int(6 * scale), y), text, font=font_small, fill=(42, 48, 56))
+
     chart_card = (right_x, section_y, right_x + right_w, section_y + content_h)
     draw_card(draw, chart_card, radius, (255, 255, 255))
     draw.text(
@@ -5176,7 +5238,8 @@ def render_month_report_png(
     chart_x0 = right_x + chart_pad
     chart_y0 = section_y + int(52 * scale)
     chart_w = right_w - chart_pad * 2
-    chart_h = content_h - int(80 * scale)
+    sub_table_h = int(150 * scale)
+    chart_h = content_h - sub_table_h - int(90 * scale)
     base_y = chart_y0 + chart_h - int(20 * scale)
 
     service_items = []
@@ -5186,6 +5249,7 @@ def render_month_report_png(
             {
                 "date": dt.date.fromisoformat(s["service_date"]),
                 "total": total,
+                "status": str(s["mnsps_status"] or ""),
             }
         )
     max_total = max([item["total"] for item in service_items], default=0)
@@ -5205,17 +5269,93 @@ def render_month_report_png(
         for idx, item in enumerate(service_items):
             bar_x = chart_x0 + bar_gap + idx * (bar_w + bar_gap)
             bar_h = int((item["total"] / max_total) * (chart_h - int(40 * scale)))
-            draw.rectangle((bar_x, base_y - bar_h, bar_x + bar_w, base_y), fill=(52, 122, 226))
+            status = item["status"]
+            status_ok = status == "Собрана"
+            bar_color = (97, 188, 109) if status_ok else (239, 127, 127)
+            draw.rectangle((bar_x, base_y - bar_h, bar_x + bar_w, base_y), fill=bar_color)
             label = item["date"].strftime("%d.%m")
             label_w, label_h = text_bbox(draw, label, font_small)
             draw.text((bar_x + (bar_w - label_w) / 2, base_y + int(4 * scale)), label, font=font_small, fill=(94, 102, 112))
+            value_label = fmt_money(float(item["total"]))
+            value_w, value_h = text_bbox(draw, value_label, font_small)
+            draw.text(
+                (bar_x + (bar_w - value_w) / 2, base_y - bar_h - value_h - int(4 * scale)),
+                value_label,
+                font=font_small,
+                fill=(28, 33, 39),
+            )
+            status_label = "✓" if status_ok else "✗"
+            status_color = (97, 188, 109) if status_ok else (239, 127, 127)
+            status_w, _ = text_bbox(draw, status_label, font_small)
+            draw.text(
+                (bar_x + (bar_w - status_w) / 2, base_y - bar_h - value_h - int(18 * scale)),
+                status_label,
+                font=font_small,
+                fill=status_color,
+            )
 
         weekly_min = float(summary["weekly_min_needed"] or 0.0)
         if weekly_min > 0:
             line_y = base_y - int((min(weekly_min, max_total) / max_total) * (chart_h - int(40 * scale)))
             draw.line((chart_x0, line_y, chart_x0 + chart_w, line_y), fill=(239, 127, 127), width=int(2 * scale))
-            label = "weekly_min_needed"
+            label = "МНСП"
             draw.text((chart_x0 + int(4 * scale), line_y - int(18 * scale)), label, font=font_small, fill=(239, 127, 127))
+
+    sub_table_x0 = right_x + int(18 * scale)
+    sub_table_x1 = right_x + right_w - int(18 * scale)
+    sub_table_y0 = chart_y0 + chart_h + int(30 * scale)
+    sub_table_y1 = section_y + content_h - int(16 * scale)
+    if sub_table_y1 > sub_table_y0:
+        draw.text((sub_table_x0, sub_table_y0 - int(22 * scale)), "Доп. счета", font=font_section, fill=(28, 33, 39))
+        header_h = int(20 * scale)
+        draw.rounded_rectangle(
+            (sub_table_x0, sub_table_y0, sub_table_x1, sub_table_y0 + header_h),
+            radius=int(8 * scale),
+            fill=(235, 238, 245),
+        )
+        col_date_w = int((sub_table_x1 - sub_table_x0) * 0.3)
+        col_w = (sub_table_x1 - sub_table_x0 - col_date_w) / 2
+        draw.text((sub_table_x0 + int(6 * scale), sub_table_y0 + int(2 * scale)), "Дата", font=font_small, fill=(58, 66, 76))
+        draw.text((sub_table_x0 + col_date_w + int(6 * scale), sub_table_y0 + int(2 * scale)), "Praise +", font=font_small, fill=(58, 66, 76))
+        draw.text((sub_table_x0 + col_date_w + col_w + int(6 * scale), sub_table_y0 + int(2 * scale)), "Alpha +", font=font_small, fill=(58, 66, 76))
+
+        sub_income: Dict[dt.date, Dict[str, float]] = {}
+        for row in subaccount_services:
+            date = dt.date.fromisoformat(row["service_date"])
+            account = str(row["account"])
+            total = float(row["total"] or 0.0)
+            sub_income.setdefault(date, {}).setdefault(account, 0.0)
+            sub_income[date][account] += total
+
+        sub_spend: Dict[str, float] = {"praise": 0.0, "alpha": 0.0}
+        for row in subaccount_expenses:
+            account = str(row["account"])
+            if account in sub_spend:
+                sub_spend[account] += float(row["total"] or 0.0)
+
+        dates = sorted(sub_income.keys())
+        row_h = int(18 * scale)
+        y = sub_table_y0 + header_h + int(6 * scale)
+        if not dates:
+            draw.text((sub_table_x0 + int(6 * scale), y), "Нет данных", font=font_small, fill=(120, 126, 136))
+            y += row_h
+        else:
+            for idx, date in enumerate(dates):
+                if y + row_h > sub_table_y1 - row_h:
+                    break
+                if idx % 2 == 0:
+                    draw.rectangle((sub_table_x0, y - int(2 * scale), sub_table_x1, y + row_h - int(2 * scale)), fill=(248, 250, 253))
+                draw.text((sub_table_x0 + int(6 * scale), y), date.strftime("%d.%m"), font=font_small, fill=(42, 48, 56))
+                praise = fmt_money(sub_income[date].get("praise", 0.0))
+                alpha = fmt_money(sub_income[date].get("alpha", 0.0))
+                draw.text((sub_table_x0 + col_date_w + int(6 * scale), y), praise, font=font_small, fill=(42, 48, 56))
+                draw.text((sub_table_x0 + col_date_w + col_w + int(6 * scale), y), alpha, font=font_small, fill=(42, 48, 56))
+                y += row_h
+        if y + row_h <= sub_table_y1:
+            draw.line((sub_table_x0, y, sub_table_x1, y), fill=(220, 224, 232), width=max(1, int(1 * scale)))
+            draw.text((sub_table_x0 + int(6 * scale), y + int(2 * scale)), "Расходы", font=font_small, fill=(94, 102, 112))
+            draw.text((sub_table_x0 + col_date_w + int(6 * scale), y + int(2 * scale)), fmt_money(sub_spend["praise"]), font=font_small, fill=(239, 127, 127))
+            draw.text((sub_table_x0 + col_date_w + col_w + int(6 * scale), y + int(2 * scale)), fmt_money(sub_spend["alpha"]), font=font_small, fill=(239, 127, 127))
 
     tz = CFG.tzinfo()
     now = dt.datetime.now(tz)
@@ -5262,7 +5402,34 @@ def export_png(
     other_sum = max(float(summary["month_expenses_sum"]) - sum_top, 0.0)
     top_entries.append({"category": "Другое", "sum": round(other_sum, 2)})
 
-    png_data = render_month_report_png(m, summary, services, top_entries, preset)
+    expenses = db_fetchall(
+        """
+        SELECT expense_date, category, title, total, account
+        FROM expenses
+        WHERE month_id=? AND account='main'
+        ORDER BY expense_date ASC, id ASC;
+        """,
+        (month_id,),
+    )
+    sub_services = db_fetchall(
+        """
+        SELECT service_date, total, account
+        FROM services
+        WHERE month_id=? AND account!='main'
+        ORDER BY service_date ASC;
+        """,
+        (month_id,),
+    )
+    sub_expenses = db_fetchall(
+        """
+        SELECT expense_date, total, account
+        FROM expenses
+        WHERE month_id=? AND account!='main'
+        ORDER BY expense_date ASC, id ASC;
+        """,
+        (month_id,),
+    )
+    png_data = render_month_report_png(m, summary, services, top_entries, expenses, sub_services, sub_expenses, preset)
     filename = f"report_{m['year']}_{int(m['month']):02d}_{preset}.png"
     return Response(
         content=png_data,
