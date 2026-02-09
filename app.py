@@ -10,6 +10,8 @@ import dataclasses
 import datetime as dt
 import hashlib
 import hmac
+import importlib.util
+import io
 import json
 import os
 import re
@@ -4953,6 +4955,313 @@ async def api_restore_backup(
 # ---------------------------
 # Export
 # ---------------------------
+
+PNG_PRESETS = {
+    "landscape": (1600, 900),
+    "square": (1080, 1080),
+    "story": (1080, 1920),
+}
+
+RU_MONTHS = [
+    "января",
+    "февраля",
+    "марта",
+    "апреля",
+    "мая",
+    "июня",
+    "июля",
+    "августа",
+    "сентября",
+    "октября",
+    "ноября",
+    "декабря",
+]
+
+
+def require_pillow() -> Tuple[Any, Any, Any]:
+    if importlib.util.find_spec("PIL") is None:
+        raise HTTPException(status_code=501, detail="Pillow (PIL) is required for PNG export")
+    from PIL import Image, ImageDraw, ImageFont
+
+    return Image, ImageDraw, ImageFont
+
+
+def load_ttf_font(image_font: Any, size: int, bold: bool = False) -> Any:
+    font_candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf" if bold else "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    ]
+    for path in font_candidates:
+        if Path(path).exists():
+            return image_font.truetype(path, size=size)
+    raise HTTPException(status_code=500, detail="No compatible TTF font found for PNG export")
+
+
+def text_bbox(draw: Any, text: str, font: Any) -> Tuple[int, int]:
+    bbox = draw.textbbox((0, 0), text, font=font)
+    return bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+
+def draw_card(draw: Any, xy: Tuple[int, int, int, int], radius: int, fill: Tuple[int, int, int]) -> None:
+    x0, y0, x1, y1 = xy
+    shadow_offset = int(max(2, radius / 3))
+    shadow_color = (210, 215, 225)
+    draw.rounded_rectangle(
+        (x0 + shadow_offset, y0 + shadow_offset, x1 + shadow_offset, y1 + shadow_offset),
+        radius=radius,
+        fill=shadow_color,
+    )
+    draw.rounded_rectangle((x0, y0, x1, y1), radius=radius, fill=fill)
+
+
+def render_month_report_png(
+    month_row: sqlite3.Row,
+    summary: Dict[str, Any],
+    services: List[sqlite3.Row],
+    top_categories: List[Dict[str, Any]],
+    preset: str,
+) -> bytes:
+    Image, ImageDraw, ImageFont = require_pillow()
+    size = PNG_PRESETS[preset]
+    w, h = size
+    scale = w / 1600
+
+    bg = Image.new("RGB", size, (245, 247, 251))
+    draw = ImageDraw.Draw(bg)
+
+    font_title = load_ttf_font(ImageFont, size=int(40 * scale), bold=True)
+    font_kpi_value = load_ttf_font(ImageFont, size=int(30 * scale), bold=True)
+    font_kpi_label = load_ttf_font(ImageFont, size=int(16 * scale), bold=False)
+    font_section = load_ttf_font(ImageFont, size=int(20 * scale), bold=True)
+    font_body = load_ttf_font(ImageFont, size=int(16 * scale), bold=False)
+    font_small = load_ttf_font(ImageFont, size=int(13 * scale), bold=False)
+
+    margin = int(40 * scale)
+    gap = int(20 * scale)
+    radius = int(18 * scale)
+
+    month_name = RU_MONTHS[int(month_row["month"]) - 1]
+    title = f"Отчёт за {month_name} {int(month_row['year'])}"
+    draw.text((margin, margin), title, font=font_title, fill=(28, 33, 39))
+
+    kpi_y = margin + int(60 * scale)
+    kpi_h = int(140 * scale)
+    kpi_w = int((w - margin * 2 - gap * 3) / 4)
+
+    kpis = [
+        ("Доход", fmt_money(float(summary["month_income_sum"]))),
+        ("Расход", fmt_money(float(summary["month_expenses_sum"]))),
+        ("Баланс месяца", fmt_money(float(summary["month_balance"]))),
+        ("Факт. баланс", fmt_money(float(summary["fact_balance"]))),
+    ]
+
+    for idx, (label, value) in enumerate(kpis):
+        x0 = margin + idx * (kpi_w + gap)
+        card = (x0, kpi_y, x0 + kpi_w, kpi_y + kpi_h)
+        draw_card(draw, card, radius, (255, 255, 255))
+        draw.text((x0 + int(18 * scale), kpi_y + int(18 * scale)), label, font=font_kpi_label, fill=(94, 102, 112))
+        draw.text((x0 + int(18 * scale), kpi_y + int(58 * scale)), value, font=font_kpi_value, fill=(20, 24, 29))
+
+    section_y = kpi_y + kpi_h + int(30 * scale)
+    footer_h = int(36 * scale)
+    content_h = h - section_y - footer_h - margin
+    left_w = int(w * 0.4)
+    right_w = w - margin * 2 - gap - left_w
+    left_x = margin
+    right_x = left_x + left_w + gap
+
+    plan_h = int(170 * scale)
+    plan_card = (left_x, section_y, left_x + left_w, section_y + plan_h)
+    draw_card(draw, plan_card, radius, (255, 255, 255))
+    draw.text((left_x + int(18 * scale), section_y + int(16 * scale)), "План/цели", font=font_section, fill=(28, 33, 39))
+
+    psdpm = summary["psdpm"]
+    psdpm_text = f"{psdpm*100:.1f}%" if isinstance(psdpm, (int, float)) else "—"
+    completion = fmt_percent_1(float(summary["monthly_completion"]))
+    plan_items = [
+        ("МНСП", fmt_money(float(summary["monthly_min_needed"]))),
+        ("Выполнение МНСП", completion),
+        ("СДДР", fmt_money(float(summary["sddr"]))),
+        ("ПСДПМ", psdpm_text),
+    ]
+    plan_y = section_y + int(55 * scale)
+    for idx, (label, value) in enumerate(plan_items):
+        line_y = plan_y + idx * int(26 * scale)
+        draw.text((left_x + int(18 * scale), line_y), label, font=font_body, fill=(94, 102, 112))
+        value_w, _ = text_bbox(draw, value, font_body)
+        draw.text((left_x + left_w - int(18 * scale) - value_w, line_y), value, font=font_body, fill=(28, 33, 39))
+
+    expenses_card_y = section_y + plan_h + gap
+    expenses_card = (left_x, expenses_card_y, left_x + left_w, section_y + content_h)
+    draw_card(draw, expenses_card, radius, (255, 255, 255))
+    draw.text(
+        (left_x + int(18 * scale), expenses_card_y + int(16 * scale)),
+        "Структура расходов",
+        font=font_section,
+        fill=(28, 33, 39),
+    )
+
+    pie_pad = int(18 * scale)
+    pie_top = expenses_card_y + int(50 * scale)
+    pie_area_h = expenses_card[3] - pie_top - int(16 * scale)
+    pie_size = min(int(left_w * 0.45), pie_area_h)
+    pie_x0 = left_x + pie_pad
+    pie_y0 = pie_top + int((pie_area_h - pie_size) / 2)
+    pie_box = (pie_x0, pie_y0, pie_x0 + pie_size, pie_y0 + pie_size)
+
+    total_expenses = float(summary["month_expenses_sum"])
+    palette = [
+        (52, 122, 226),
+        (97, 188, 109),
+        (255, 190, 92),
+        (239, 127, 127),
+        (160, 116, 196),
+        (122, 170, 255),
+    ]
+
+    if total_expenses <= 0:
+        msg = "Нет данных"
+        msg_w, msg_h = text_bbox(draw, msg, font_body)
+        draw.text(
+            (pie_x0 + (pie_size - msg_w) / 2, pie_y0 + (pie_size - msg_h) / 2),
+            msg,
+            font=font_body,
+            fill=(140, 148, 158),
+        )
+    else:
+        start_angle = -90
+        for idx, item in enumerate(top_categories):
+            value = float(item["sum"])
+            if value <= 0:
+                continue
+            sweep = 360 * (value / total_expenses)
+            draw.pieslice(pie_box, start=start_angle, end=start_angle + sweep, fill=palette[idx % len(palette)])
+            start_angle += sweep
+
+    legend_x = pie_x0 + pie_size + int(16 * scale)
+    legend_y = pie_top + int(10 * scale)
+    for idx, item in enumerate(top_categories):
+        label = f"{item['category']}: {fmt_money(float(item['sum']))}"
+        color = palette[idx % len(palette)]
+        draw.rectangle(
+            (legend_x, legend_y + idx * int(22 * scale), legend_x + int(10 * scale), legend_y + int(10 * scale) + idx * int(22 * scale)),
+            fill=color,
+        )
+        draw.text(
+            (legend_x + int(16 * scale), legend_y + idx * int(22 * scale) - int(2 * scale)),
+            label,
+            font=font_small,
+            fill=(28, 33, 39),
+        )
+
+    chart_card = (right_x, section_y, right_x + right_w, section_y + content_h)
+    draw_card(draw, chart_card, radius, (255, 255, 255))
+    draw.text(
+        (right_x + int(18 * scale), section_y + int(16 * scale)),
+        "Доходы по служениям",
+        font=font_section,
+        fill=(28, 33, 39),
+    )
+
+    chart_pad = int(24 * scale)
+    chart_x0 = right_x + chart_pad
+    chart_y0 = section_y + int(52 * scale)
+    chart_w = right_w - chart_pad * 2
+    chart_h = content_h - int(80 * scale)
+    base_y = chart_y0 + chart_h - int(20 * scale)
+
+    service_items = []
+    for s in services:
+        total = float(s["total"] or 0.0)
+        service_items.append(
+            {
+                "date": dt.date.fromisoformat(s["service_date"]),
+                "total": total,
+            }
+        )
+    max_total = max([item["total"] for item in service_items], default=0)
+
+    if max_total <= 0:
+        msg = "Нет данных"
+        msg_w, msg_h = text_bbox(draw, msg, font_body)
+        draw.text(
+            (chart_x0 + (chart_w - msg_w) / 2, chart_y0 + (chart_h - msg_h) / 2),
+            msg,
+            font=font_body,
+            fill=(140, 148, 158),
+        )
+    else:
+        bar_gap = max(4, int(6 * scale))
+        bar_w = max(8, int((chart_w - bar_gap * (len(service_items) + 1)) / max(len(service_items), 1)))
+        for idx, item in enumerate(service_items):
+            bar_x = chart_x0 + bar_gap + idx * (bar_w + bar_gap)
+            bar_h = int((item["total"] / max_total) * (chart_h - int(40 * scale)))
+            draw.rectangle((bar_x, base_y - bar_h, bar_x + bar_w, base_y), fill=(52, 122, 226))
+            label = item["date"].strftime("%d.%m")
+            label_w, label_h = text_bbox(draw, label, font_small)
+            draw.text((bar_x + (bar_w - label_w) / 2, base_y + int(4 * scale)), label, font=font_small, fill=(94, 102, 112))
+
+        weekly_min = float(summary["weekly_min_needed"] or 0.0)
+        if weekly_min > 0:
+            line_y = base_y - int((min(weekly_min, max_total) / max_total) * (chart_h - int(40 * scale)))
+            draw.line((chart_x0, line_y, chart_x0 + chart_w, line_y), fill=(239, 127, 127), width=int(2 * scale))
+            label = "weekly_min_needed"
+            draw.text((chart_x0 + int(4 * scale), line_y - int(18 * scale)), label, font=font_small, fill=(239, 127, 127))
+
+    tz = CFG.tzinfo()
+    now = dt.datetime.now(tz)
+    tz_name = now.tzname() or CFG.TZ
+    footer_text = f"Сформировано: {now.strftime('%d.%m.%Y %H:%M')} ({tz_name})"
+    draw.text((margin, h - footer_h), footer_text, font=font_small, fill=(120, 126, 136))
+
+    out = io.BytesIO()
+    bg.save(out, format="PNG")
+    return out.getvalue()
+
+
+@APP.get("/api/export/png")
+def export_png(
+    month_id: int = Query(...),
+    preset: str = Query("landscape"),
+    u: sqlite3.Row = Depends(require_role("admin", "accountant", "viewer")),
+):
+    if preset not in PNG_PRESETS:
+        raise HTTPException(status_code=400, detail="Invalid preset")
+
+    m = get_month_by_id(month_id)
+    summary = compute_month_summary(month_id, ensure_tithe=True)
+    services = db_fetchall(
+        "SELECT * FROM services WHERE month_id=? AND account='main' ORDER BY service_date ASC;",
+        (month_id,),
+    )
+    rows = db_fetchall(
+        """
+        SELECT category, COALESCE(SUM(total),0) AS s
+        FROM expenses
+        WHERE month_id=? AND account='main'
+        GROUP BY category
+        ORDER BY s DESC, category ASC;
+        """,
+        (month_id,),
+    )
+    top_entries = [
+        {"category": str(r["category"] or "—"), "sum": round(float(r["s"]), 2)} for r in rows[:5]
+    ]
+    sum_top = sum(item["sum"] for item in top_entries)
+    while len(top_entries) < 5:
+        top_entries.append({"category": "—", "sum": 0.0})
+    other_sum = max(float(summary["month_expenses_sum"]) - sum_top, 0.0)
+    top_entries.append({"category": "Другое", "sum": round(other_sum, 2)})
+
+    png_data = render_month_report_png(m, summary, services, top_entries, preset)
+    filename = f"report_{m['year']}_{int(m['month']):02d}_{preset}.png"
+    return Response(
+        content=png_data,
+        media_type="image/png",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
 
 @APP.get("/api/export/csv")
 def export_csv(
