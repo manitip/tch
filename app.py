@@ -4991,11 +4991,17 @@ def load_ttf_font(image_font: Any, size: int, bold: bool = False) -> Any:
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
         "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf" if bold else "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+        "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf",
     ]
     for path in font_candidates:
-        if Path(path).exists():
+        if isinstance(path, str) and path.startswith("/"):
+            if not Path(path).exists():
+                continue
+        try:
             return image_font.truetype(path, size=size)
-    raise HTTPException(status_code=500, detail="No compatible TTF font found for PNG export")
+        except OSError:
+            continue
+    return image_font.load_default()
 
 
 def text_bbox(draw: Any, text: str, font: Any) -> Tuple[int, int]:
