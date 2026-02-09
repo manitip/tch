@@ -1,0 +1,13 @@
+[
+  { "telegram_id": 1677321068, "name": "Никита", "role": "admin", "active": true },
+  { "telegram_id": 1212121212, "name": "Мария", "role": "accountant", "active": true },
+  { "telegram_id": 448485212, "name": "Пастор", "role": "viewer", "active": true },
+    {
+    "telegram_id": 5738620158,
+    "name": "Подписант наличных",
+    "role": "cash_signer",
+    "active": true,
+    "cash_scopes": ["MAIN", "PRAISE", "ALPHA"],
+    "cash_ops": ["collect", "withdraw"]
+  }
+]
