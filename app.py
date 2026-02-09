@@ -5023,8 +5023,16 @@ def load_ttf_font(image_font: Any, size: int, bold: bool = False) -> Any:
             return image_font.truetype(p_str, size=size)
         except Exception:
             continue
-
     return image_font.load_default()
+
+
+def parse_iso_date(value: Any) -> Optional[dt.date]:
+    if not value:
+        return None
+    try:
+        return dt.date.fromisoformat(str(value))
+    except ValueError:
+        return None
 
 
 
@@ -5411,9 +5419,12 @@ def render_month_report_png(
     service_items = []
     for s in services:
         total = float(s["total"] or 0.0)
+        service_date = parse_iso_date(s["service_date"])
+        if not service_date:
+            continue
         service_items.append(
             {
-                "date": dt.date.fromisoformat(s["service_date"]),
+                "date": service_date,
                 "total": total,
                 "status": str(s["mnsps_status"] or ""),
             }
@@ -5492,7 +5503,9 @@ def render_month_report_png(
 
         sub_income: Dict[dt.date, Dict[str, float]] = {}
         for row in subaccount_services:
-            d = dt.date.fromisoformat(row["service_date"])
+            d = parse_iso_date(row["service_date"])
+            if not d:
+                continue
             acc = str(row["account"])
             total = float(row["total"] or 0.0)
             sub_income.setdefault(d, {}).setdefault(acc, 0.0)
@@ -5546,7 +5559,8 @@ def render_month_report_png(
 
     expense_items: List[str] = []
     for row in expenses:
-        date = dt.date.fromisoformat(row["expense_date"]).strftime("%d.%m")
+        date_value = parse_iso_date(row["expense_date"])
+        date = date_value.strftime("%d.%m") if date_value else "—"
         category = str(row["category"] or "—")
         title2 = str(row["title"] or "—")
         total2 = fmt_money(float(row["total"] or 0.0))
