@@ -1590,13 +1590,33 @@
     }
     .cashflowActTable td:nth-child(3),
     .cashflowActTable td:nth-child(4),
-    .cashflowActTable td:nth-child(5){
+    .cashflowActTable td:nth-child(5),
+    .cashflowActTable td:nth-child(6){
       white-space: normal;
       word-break: break-word;
     }
     .cashflowActTable th:nth-child(2),
     .cashflowActTable td:nth-child(2){
       text-align: right;
+    }
+    .sigCell{
+      display:flex;
+      flex-direction:column;
+      gap: 6px;
+      align-items:flex-start;
+    }
+    .sigImage{
+      width: 120px;
+      height: 36px;
+      object-fit: contain;
+      border-radius: 10px;
+      padding: 4px 6px;
+      background: var(--card2);
+      border: 1px solid var(--stroke);
+    }
+    .sigMeta{
+      font-size: 11px;
+      color: var(--muted2);
     }
 
 
@@ -6803,6 +6823,7 @@
      **********************/
     const CashflowState = {
       currentId: null,
+      signatureUrls: [],
     };
 
     function fmtCashflowAccount(code){
@@ -6826,7 +6847,7 @@
       }[st] || st;
     }
 
-    function createSignaturePad(){
+    function createSignaturePad(onChange){
       const wrap = document.createElement("div");
       const canvas = document.createElement("canvas");
       canvas.className = "sigPad";
@@ -6840,6 +6861,13 @@
       const ctx = canvas.getContext("2d");
       let drawing = false;
       let last = null;
+      let moved = false;
+      let hasInk = false;
+      const setInk = (val)=>{
+        if (hasInk === val) return;
+        hasInk = val;
+        if (typeof onChange === "function") onChange(hasInk);
+      };
       const resize = ()=>{
         const rect = canvas.getBoundingClientRect();
         const dpr = window.devicePixelRatio || 1;
@@ -6854,7 +6882,11 @@
         const rect = canvas.getBoundingClientRect();
         return { x: e.clientX - rect.left, y: e.clientY - rect.top };
       };
-      const start = (e)=>{ drawing = true; last = pos(e); };
+      const start = (e)=>{
+        drawing = true;
+        last = pos(e);
+        moved = false;
+      };
       const move = (e)=>{
         if (!drawing) return;
         const p = pos(e);
@@ -6863,18 +6895,38 @@
         ctx.lineTo(p.x, p.y);
         ctx.stroke();
         last = p;
+        moved = true;
+        setInk(true);
       };
-      const end = ()=>{ drawing = false; last = null; };
+      const end = ()=>{
+        if (drawing && !moved && last){
+          ctx.beginPath();
+          ctx.moveTo(last.x, last.y);
+          ctx.lineTo(last.x + 0.1, last.y + 0.1);
+          ctx.stroke();
+          setInk(true);
+        }
+        drawing = false;
+        last = null;
+      };
 
       canvas.addEventListener("pointerdown", (e)=>{ canvas.setPointerCapture(e.pointerId); start(e); });
       canvas.addEventListener("pointermove", move);
       canvas.addEventListener("pointerup", end);
       canvas.addEventListener("pointercancel", end);
-      btn.addEventListener("click", ()=> ctx.clearRect(0, 0, canvas.width, canvas.height));
+      btn.addEventListener("click", ()=>{
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        setInk(false);
+      });
       window.addEventListener("resize", resize);
       setTimeout(resize, 0);
+      setInk(false);
 
-      return { wrap, dataUrl: ()=> canvas.toDataURL("image/png") };
+      return {
+        wrap,
+        dataUrl: ()=> canvas.toDataURL("image/png"),
+        hasInk: ()=> hasInk,
+      };
     }
 
     function renderCashflowList(items){
@@ -6989,15 +7041,24 @@
       if (canAdminSign) {
         const signBlock = document.createElement("div");
         signBlock.className = "form";
-        const pad = createSignaturePad();
         signBlock.innerHTML = `<div class="divider"></div><div class="bold" style="margin-bottom:6px;">Подпись</div>`;
-        signBlock.appendChild(pad.wrap);
         const btn = document.createElement("button");
         btn.className = "btn ok";
         btn.type = "button";
         btn.innerHTML = `<span class="icon">check_circle</span> Подписать`;
         btn.style.marginTop = "8px";
+        btn.disabled = true;
+        btn.setAttribute("aria-disabled", "true");
+        const pad = createSignaturePad((ready)=>{
+          btn.disabled = !ready;
+          btn.setAttribute("aria-disabled", ready ? "false" : "true");
+        });
+        signBlock.appendChild(pad.wrap);
         btn.addEventListener("click", async ()=>{
+          if (!pad.hasInk()){
+            setToast("Нарисуйте подпись перед отправкой.");
+            return;
+          }
           await API.post(`/api/cashflow/requests/${r.id}/sign`, { signature: pad.dataUrl() });
           await loadCashflowRequests();
           await openCashflowDetail(r.id);
@@ -7030,29 +7091,65 @@
       if (!body) return;
       const items = data.items || [];
       body.innerHTML = "";
+      CashflowState.signatureUrls?.forEach((url)=> URL.revokeObjectURL(url));
+      CashflowState.signatureUrls = [];
       if (!items.length){
         body.innerHTML = `<tr><td colspan="6" class="muted2">Нет данных.</td></tr>`;
         return;
       }
-      items.forEach((r)=>{
-        const sig = (r.signature_value || "").startsWith("ОТКАЗ")
-          ? r.signature_value
-          : (r.signature_path ? "Подпись" : (r.signature_value || ""));
+      const makeBadge = (text, tone)=>{
+        const span = document.createElement("span");
+        span.className = `badge${tone ? ` ${tone}` : ""}`;
+        span.textContent = text;
+        return span;
+      };
+      for (const r of items){
+        const sigValue = r.signature_value || "";
+        const sigIsRefuse = sigValue.startsWith("ОТКАЗ");
+        const hasImage = !!r.signature_path;
         const date = r.date || r.created_at || "";
         const fio = r.fio || r.name_snapshot || "";
         const userType = r.user_type || r.role_snapshot || "";
         const op = fmtCashflowOp(r.op_type || "");
         const tr = document.createElement("tr");
+
+        const sigCell = document.createElement("td");
+        sigCell.className = "sigCell";
+
+        if (sigIsRefuse){
+          sigCell.appendChild(makeBadge(sigValue, "bad"));
+        } else if (hasImage){
+          const img = document.createElement("img");
+          img.className = "sigImage";
+          img.alt = "Подпись";
+          img.loading = "lazy";
+          sigCell.appendChild(img);
+          sigCell.appendChild(makeBadge("Подписано", "ok"));
+          try{
+            const blob = await API.getBlob(`/api/cashflow/requests/${r.request_id}/participants/${r.participant_telegram_id}/signature.png`);
+            const url = URL.createObjectURL(blob);
+            CashflowState.signatureUrls.push(url);
+            img.src = url;
+          }catch{
+            sigCell.appendChild(makeBadge("Подпись не найдена", "warn"));
+          }
+        } else if (sigValue){
+          const text = sigValue === "SIGNED" ? "Подписано" : sigValue;
+          sigCell.appendChild(makeBadge(text, sigValue === "SIGNED" ? "ok" : "warn"));
+        } else {
+          sigCell.appendChild(makeBadge("Ожидает подписи", "warn"));
+        }
+
         tr.innerHTML = `
           <td>${escapeHtml(date)}</td>
           <td>${escapeHtml(op)}</td>
           <td>${Number(r.amount || 0).toFixed(2)}</td>
           <td>${escapeHtml(fio)}</td>
           <td>${escapeHtml(userType)}</td>
-          <td>${escapeHtml(sig)}</td>
         `;
+        tr.appendChild(sigCell);
         body.appendChild(tr);
-      });
+      }
     }
 
 
