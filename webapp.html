@@ -1565,6 +1565,42 @@
       color: rgba(16,185,129,.95);
     }
 
+    .cashflowActTable{
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+      min-width: 520px;
+      font-size: 13px;
+    }
+    .cashflowActTable th,
+    .cashflowActTable td{
+      padding: 10px 8px;
+      border-bottom: 1px solid var(--stroke);
+      text-align: left;
+      vertical-align: top;
+    }
+    .cashflowActTable th{
+      color: var(--muted);
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .cashflowActTable td:nth-child(3),
+    .cashflowActTable td:nth-child(4),
+    .cashflowActTable td:nth-child(5),
+    .cashflowActTable td:nth-child(6){
+      white-space: normal;
+      word-break: break-word;
+    }
+    .cashflowActTable th:nth-child(2),
+    .cashflowActTable td:nth-child(2){
+      text-align: right;
+    }
+    .sigCell{
+      display:flex;
+      flex-direction:column;
+      gap: 6px;
+      align-items:flex-start;
+    }
     .cashflowActList{
       display:flex;
       flex-direction:column;
@@ -2979,6 +3015,23 @@
                         </button>
                       </div>
                       <div class="spacer12"></div>
+                      <div style="overflow:auto;">
+                        <table class="cashflowActTable">
+                          <thead>
+                            <tr>
+                              <th>Дата</th>
+                              <th>Операция</th>
+                              <th>Сумма</th>
+                              <th>ФИО</th>
+                              <th>Тип пользователя</th>
+                              <th>Подпись</th>
+                            </tr>
+                          </thead>
+                          <tbody id="cashflowActBody">
+                            <tr><td colspan="6" class="muted2">Нет данных.</td></tr>
+                          </tbody>
+                        </table>
+                      </div>
                       <div id="cashflowActList" class="cashflowActList"></div>
                       <div id="cashflowActEmpty" class="tiny muted2">Нет данных.</div>
                     </div>
@@ -7093,11 +7146,18 @@
       const q = new URLSearchParams();
       if (account) q.set("account", account);
       const data = await API.get(`/api/cashflow/withdraw-act?${q.toString()}`);
+      const body = $("#cashflowActBody");
       const list = $("#cashflowActList");
       const empty = $("#cashflowActEmpty");
-      if (!list || !empty) return;
+      if (!body && !list) return;
+      if (!empty) return;
       const items = data.items || [];
-      list.innerHTML = "";
+      if (body) {
+        body.innerHTML = "";
+      }
+      if (list) {
+        list.innerHTML = "";
+      }
       CashflowState.signatureUrls?.forEach((url)=> URL.revokeObjectURL(url));
       CashflowState.signatureUrls = [];
       empty.classList.toggle("hidden", items.length > 0);
@@ -7107,6 +7167,12 @@
         span.textContent = text;
         return span;
       };
+      if (!items.length){
+        if (body) {
+          body.innerHTML = `<tr><td colspan="6" class="muted2">Нет данных.</td></tr>`;
+        }
+        return;
+      }
       for (const r of items){
         const sigValue = r.signature_value || "";
         const sigIsRefuse = sigValue.startsWith("ОТКАЗ");
@@ -7115,66 +7181,91 @@
         const fio = r.fio || r.name_snapshot || "";
         const userType = r.user_type || r.role_snapshot || "";
         const op = fmtCashflowOp(r.op_type || "");
-        const card = document.createElement("div");
-        card.className = "actCard";
-
-        const header = document.createElement("div");
-        header.className = "actHeader";
-
-        const title = document.createElement("div");
-        title.className = "actTitle";
-        title.innerHTML = `
-          <div class="actOp">${escapeHtml(op)}</div>
-          <div class="actMeta">
-            <span>${escapeHtml(date)}</span>
-          </div>
-        `;
-
-        const amount = document.createElement("div");
-        amount.className = "actAmount";
-        amount.textContent = `${Number(r.amount || 0).toFixed(2)}`;
-
-        header.appendChild(title);
-        header.appendChild(amount);
-        card.appendChild(header);
-
-        const person = document.createElement("div");
-        person.className = "actPerson";
-        person.innerHTML = `
-          <div class="name">${escapeHtml(fio || "—")}</div>
-          <div class="role">${escapeHtml(userType || "—")}</div>
-        `;
-        card.appendChild(person);
-
-        const signature = document.createElement("div");
-        signature.className = "actSignature";
+        const amountText = `${Number(r.amount || 0).toFixed(2)}`;
+        const signatureCard = document.createElement("div");
+        signatureCard.className = "actSignature";
+        const sigCell = document.createElement("td");
+        sigCell.className = "sigCell";
+        const appendBadge = (badge)=>{
+          signatureCard.appendChild(badge.cloneNode(true));
+          sigCell.appendChild(badge);
+        };
 
         if (sigIsRefuse){
-          signature.appendChild(makeBadge(sigValue, "bad"));
+          appendBadge(makeBadge(sigValue, "bad"));
         } else if (hasImage){
           const img = document.createElement("img");
           img.className = "sigImage";
           img.alt = "Подпись";
           img.loading = "lazy";
-          signature.appendChild(img);
-          signature.appendChild(makeBadge("Подписано", "ok"));
+          signatureCard.appendChild(img);
+          const cellImg = img.cloneNode();
+          sigCell.appendChild(cellImg);
+          appendBadge(makeBadge("Подписано", "ok"));
           try{
             const blob = await API.getBlob(`/api/cashflow/requests/${r.request_id}/participants/${r.participant_telegram_id}/signature.png`);
             const url = URL.createObjectURL(blob);
             CashflowState.signatureUrls.push(url);
             img.src = url;
+            cellImg.src = url;
           }catch{
-            signature.appendChild(makeBadge("Подпись не найдена", "warn"));
+            appendBadge(makeBadge("Подпись не найдена", "warn"));
           }
         } else if (sigValue){
           const text = sigValue === "SIGNED" ? "Подписано" : sigValue;
-          signature.appendChild(makeBadge(text, sigValue === "SIGNED" ? "ok" : "warn"));
+          appendBadge(makeBadge(text, sigValue === "SIGNED" ? "ok" : "warn"));
         } else {
-          signature.appendChild(makeBadge("Ожидает подписи", "warn"));
+          appendBadge(makeBadge("Ожидает подписи", "warn"));
         }
 
-        card.appendChild(signature);
-        list.appendChild(card);
+        if (body) {
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td>${escapeHtml(date)}</td>
+            <td>${escapeHtml(op)}</td>
+            <td>${amountText}</td>
+            <td>${escapeHtml(fio)}</td>
+            <td>${escapeHtml(userType)}</td>
+          `;
+          tr.appendChild(sigCell);
+          body.appendChild(tr);
+        }
+
+        if (list) {
+          const card = document.createElement("div");
+          card.className = "actCard";
+
+          const header = document.createElement("div");
+          header.className = "actHeader";
+
+          const title = document.createElement("div");
+          title.className = "actTitle";
+          title.innerHTML = `
+            <div class="actOp">${escapeHtml(op)}</div>
+            <div class="actMeta">
+              <span>${escapeHtml(date)}</span>
+            </div>
+          `;
+
+          const amount = document.createElement("div");
+          amount.className = "actAmount";
+          amount.textContent = amountText;
+
+          header.appendChild(title);
+          header.appendChild(amount);
+          card.appendChild(header);
+
+          const person = document.createElement("div");
+          person.className = "actPerson";
+          person.innerHTML = `
+            <div class="name">${escapeHtml(fio || "—")}</div>
+            <div class="role">${escapeHtml(userType || "—")}</div>
+          `;
+          card.appendChild(person);
+
+          card.appendChild(signatureCard);
+          list.appendChild(card);
+        }
       }
     }
 
