@@ -194,6 +194,24 @@ class Config:
             return ZoneInfo("Europe/Warsaw")
 
 
+def _origin_from_url(url: str) -> Optional[str]:
+    if not url:
+        return None
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        return None
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+def _env_flag(name: str, default: bool = True) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def load_config() -> Config:
     bot_token = _sanitize_env_value("BOT_TOKEN", os.getenv("BOT_TOKEN", ""), mask=True)
     if not bot_token:
@@ -207,11 +225,20 @@ def load_config() -> Config:
     if not os.path.isabs(users_json_path):
         users_json_path = str(base_dir / users_json_path)
 
+    raw_app_url = _sanitize_env_value("APP_URL", os.getenv("APP_URL", ""))
+    raw_webapp_url = _sanitize_env_value("WEBAPP_URL", os.getenv("WEBAPP_URL", ""))
+
+    app_url = raw_app_url or "http://localhost:8000"
+    webapp_url = raw_webapp_url or f"{app_url.rstrip('/')}/webapp"
+    if not raw_app_url and raw_webapp_url:
+        derived_origin = _origin_from_url(raw_webapp_url)
+        if derived_origin:
+            app_url = derived_origin
 
     return Config(
         BOT_TOKEN=bot_token,
-        APP_URL=_sanitize_env_value("APP_URL", os.getenv("APP_URL", "http://localhost:8000")),
-        WEBAPP_URL=_sanitize_env_value("WEBAPP_URL", os.getenv("WEBAPP_URL", "http://localhost:8000/webapp")),
+        APP_URL=app_url,
+        WEBAPP_URL=webapp_url,
         DB_PATH=db_path,
         USERS_JSON_PATH=users_json_path,
         SESSION_SECRET=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)).strip(),
@@ -223,6 +250,7 @@ def load_config() -> Config:
 
 
 CFG = load_config()
+POLLING_ENABLED = _env_flag("BOT_POLLING", True)
 
 def _is_localhost_url(parsed: urllib.parse.ParseResult) -> bool:
     host = (parsed.hostname or "").lower()
@@ -4116,14 +4144,18 @@ async def lifespan(app: FastAPI):
         scheduler.start()
     reschedule_jobs()
 
-    # start polling as background task
-    polling_task = asyncio.create_task(dp.start_polling(bot))  # type: ignore[arg-type]
+    polling_task = None
+    if POLLING_ENABLED:
+        polling_task = asyncio.create_task(dp.start_polling(bot))  # type: ignore[arg-type]
+    else:
+        CONFIG_LOG.warning("BOT_POLLING disabled; bot updates will not be received.")
 
     try:
         yield
     finally:
         try:
-            polling_task.cancel()
+            if polling_task:
+                polling_task.cancel()
         except Exception:
             pass
         try:
@@ -4139,9 +4171,17 @@ async def lifespan(app: FastAPI):
 APP = FastAPI(title="Church Accounting Bot", version="1.0.0", lifespan=lifespan)
 app = APP
 
+def _cors_allowed_origins() -> List[str]:
+    origins = {"http://localhost", "http://localhost:8000"}
+    for url in (CFG.APP_URL, CFG.WEBAPP_URL):
+        origin = _origin_from_url(url)
+        if origin:
+            origins.add(origin)
+    return sorted(origins)
+
 APP.add_middleware(
     CORSMiddleware,
-    allow_origins=[CFG.APP_URL, CFG.WEBAPP_URL, "http://localhost", "http://localhost:8000", "*"],
+    allow_origins=_cors_allowed_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
