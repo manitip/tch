@@ -224,6 +224,11 @@ def load_config() -> Config:
 
 CFG = load_config()
 
+def _is_localhost_url(parsed: urllib.parse.ParseResult) -> bool:
+    host = (parsed.hostname or "").lower()
+    return host in {"localhost", "127.0.0.1", "::1"}
+
+
 def require_https_webapp_url(url: str) -> Optional[str]:
     if not url:
         return None
@@ -231,9 +236,12 @@ def require_https_webapp_url(url: str) -> Optional[str]:
         parsed = urllib.parse.urlparse(url)
     except Exception:
         return None
-    if parsed.scheme.lower() != "https":
-        return None
-    return url
+    scheme = parsed.scheme.lower()
+    if scheme == "https":
+        return url
+    if scheme == "http" and _is_localhost_url(parsed):
+        return url
+    return None
 
 
 def require_https_app_url(url: str) -> Optional[str]:
@@ -243,9 +251,12 @@ def require_https_app_url(url: str) -> Optional[str]:
         parsed = urllib.parse.urlparse(url)
     except Exception:
         return None
-    if parsed.scheme.lower() != "https":
-        return None
-    return url
+    scheme = parsed.scheme.lower()
+    if scheme == "https":
+        return url
+    if scheme == "http" and _is_localhost_url(parsed):
+        return url
+    return None
 
 
 def cashapp_webapp_url() -> Optional[str]:
