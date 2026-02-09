@@ -2880,6 +2880,9 @@
                       <button id="exportXlsxBtn" class="btn" type="button">
                         <span class="icon">download</span> Скачать Excel (год)
                       </button>
+                      <button id="exportPngBtn" class="btn" type="button">
+                        <span class="icon">download</span> Скачать PNG (месяц)
+                      </button>
                     </div>
                     <div class="tiny muted2" style="margin-top:8px;">Откроется в браузере Telegram (скачивание зависит от клиента).</div>
                   </div>
@@ -8357,6 +8360,10 @@
       });
       $("#exportXlsxBtn").addEventListener("click", ()=>{
         openDownload(`${API.baseUrl}/api/export/excel?year=${encodeURIComponent(State.year)}`);
+      });
+      $("#exportPngBtn").addEventListener("click", ()=>{
+        if (!State.monthId){ alert("Месяц не выбран/не создан."); return; }
+        openDownload(`${API.baseUrl}/api/export/png?month_id=${encodeURIComponent(State.monthId)}&preset=landscape`);
       });
 
       $("#backupDbBtn").addEventListener("click", async ()=>{
