@@ -1463,7 +1463,7 @@ def recalc_services_for_month(month_id: int) -> None:
             pvs = 0.0
             weekly_min_for_row = 0.0
         elif income_type == "donation":
-            status = "Собрана" if (weekly_min and total > weekly_min) else "Не собрана"
+            status = "Собрана" if (weekly_min and total >= weekly_min) else "Не собрана"
             pvs = (total / weekly_min) if weekly_min else 0.0
             weekly_min_for_row = weekly_min
         else:
@@ -2798,7 +2798,7 @@ def build_sunday_report_text(today: dt.date) -> Tuple[str, InlineKeyboardMarkup]
     cash = float(service["cash"]) if service else 0.0
     total = float(service["total"]) if service else 0.0
     weekly_min = float(service["weekly_min_needed"]) if service else calc_weekly_min_needed(m)
-    status = str(service["mnsps_status"]) if service else ("Собрана" if (weekly_min and total > weekly_min) else "Не собрана")
+    status = str(service["mnsps_status"]) if service else ("Собрана" if (weekly_min and total >= weekly_min) else "Не собрана")
     pvs = float(service["pvs_ratio"]) if service else ((total / weekly_min) if weekly_min else 0.0)
 
     summary = compute_month_summary(month_id, ensure_tithe=True)
@@ -5033,6 +5033,53 @@ def text_bbox(draw: Any, text: str, font: Any) -> Tuple[int, int]:
     return bbox[2] - bbox[0], bbox[3] - bbox[1]
 
 
+def fit_text_ellipsis(draw: Any, text: str, font: Any, max_width: int) -> str:
+    if max_width <= 0:
+        return ""
+    if text_bbox(draw, text, font)[0] <= max_width:
+        return text
+    ellipsis = "…"
+    if text_bbox(draw, ellipsis, font)[0] > max_width:
+        return ""
+
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        candidate = text[:mid].rstrip() + ellipsis
+        if text_bbox(draw, candidate, font)[0] <= max_width:
+            lo = mid
+        else:
+            hi = mid - 1
+    return text[:lo].rstrip() + ellipsis
+
+
+def find_max_font_size_for_rows(
+    image_font: Any,
+    draw: Any,
+    rows: List[Tuple[str, str]],
+    max_label_w: int,
+    max_value_w: int,
+    max_row_h: int,
+    min_size: int,
+    max_size: int,
+) -> int:
+    for size in range(max_size, min_size - 1, -1):
+        font = load_ttf_font(image_font, size=size, bold=False)
+        fits_height = True
+        fits_width = True
+        for label, value in rows:
+            _, label_h = text_bbox(draw, label, font)
+            _, value_h = text_bbox(draw, value, font)
+            if max(label_h, value_h) > max_row_h:
+                fits_height = False
+                break
+            if text_bbox(draw, label, font)[0] > max_label_w or text_bbox(draw, value, font)[0] > max_value_w:
+                fits_width = False
+        if fits_height and fits_width:
+            return size
+    return min_size
+
+
 def draw_card(
     img: Any,
     xy: Tuple[int, int, int, int],
@@ -5245,7 +5292,7 @@ def render_month_report_png(
     top_h = max(content_h - list_card_h - gap, int(280 * scale))
 
     # --- PLAN CARD (с прогресс-баром) ---
-    plan_h = min(int(220 * scale), int(top_h * 0.46))
+    plan_h = min(int(252 * scale), int(top_h * 0.52))
     plan_card = (left_x, section_y, left_x + left_w, section_y + plan_h)
     draw_card(bg, plan_card, radius, color_card, shadow_alpha=38, shadow_blur=int(18 * scale), shadow_offset=(0, int(10 * scale)))
     draw.text((left_x + int(18 * scale), section_y + int(16 * scale)), "План/цели", font=font_section, fill=color_text)
@@ -5263,24 +5310,56 @@ def render_month_report_png(
         ("Среднее пожертвование", fmt_money(float(summary.get("avg_sunday") or 0.0))),
     ]
 
-    plan_y = section_y + int(56 * scale)
-    plan_bottom_padding = int(52 * scale)
-    plan_available_h = max(int(20 * scale), plan_h - int(56 * scale) - plan_bottom_padding)
-    plan_row_h = max(int(20 * scale), int(plan_available_h / max(1, len(plan_items))))
-    for idx, (label, value) in enumerate(plan_items):
-        line_y = plan_y + idx * plan_row_h
-        draw.text((left_x + int(18 * scale), line_y), label, font=font_body, fill=color_muted)
-        value_w, _ = text_bbox(draw, value, font_body)
-        draw.text((left_x + left_w - int(18 * scale) - value_w, line_y), value, font=font_body, fill=color_text)
-
     # progress bar
     bar_x0 = left_x + int(18 * scale)
-    bar_y0 = plan_card[3] - int(28 * scale)
     bar_w = left_w - int(36 * scale)
     bar_h = max(8, int(10 * scale))
     r = bar_h // 2
 
-    draw.text((bar_x0, bar_y0 - int(18 * scale)), "Прогресс", font=font_small, fill=color_muted2)
+    progress_font = load_ttf_font(ImageFont, size=max(11, int(13 * scale)), bold=False)
+    progress_label_w, progress_label_h = text_bbox(draw, "Прогресс", progress_font)
+
+    plan_top_y = section_y + int(56 * scale)
+    plan_inner_right = left_x + left_w - int(18 * scale)
+    plan_bottom_padding = int(18 * scale)
+    bar_gap_top = max(int(4 * scale), int(6 * scale))
+    bar_gap_bottom = int(12 * scale)
+    bar_y0 = plan_card[3] - plan_bottom_padding - bar_h
+    progress_y = max(plan_top_y, bar_y0 - bar_gap_top - progress_label_h)
+
+    rows_area_bottom = progress_y - bar_gap_bottom
+    plan_available_h = max(int(20 * scale), rows_area_bottom - plan_top_y)
+    plan_row_h = max(int(18 * scale), int(plan_available_h / max(1, len(plan_items))))
+
+    max_label_w = max(int(80 * scale), int(bar_w * 0.58))
+    max_value_w = max(int(72 * scale), bar_w - max_label_w - int(12 * scale))
+
+    plan_font_size = find_max_font_size_for_rows(
+        ImageFont,
+        draw,
+        plan_items,
+        max_label_w=max_label_w,
+        max_value_w=max_value_w,
+        max_row_h=plan_row_h,
+        min_size=max(10, int(11 * scale)),
+        max_size=max(12, int(16 * scale)),
+    )
+    plan_font = load_ttf_font(ImageFont, size=plan_font_size, bold=False)
+
+    for idx, (label, value) in enumerate(plan_items):
+        line_top = plan_top_y + idx * plan_row_h
+        label_text = fit_text_ellipsis(draw, label, plan_font, max_label_w)
+        value_text = fit_text_ellipsis(draw, value, plan_font, max_value_w)
+
+        _, label_h = text_bbox(draw, label_text or " ", plan_font)
+        _, value_h = text_bbox(draw, value_text or " ", plan_font)
+        line_y = line_top + max(0, int((plan_row_h - max(label_h, value_h)) / 2))
+
+        draw.text((bar_x0, line_y), label_text, font=plan_font, fill=color_muted)
+        value_w, _ = text_bbox(draw, value_text, plan_font)
+        draw.text((plan_inner_right - value_w, line_y), value_text, font=plan_font, fill=color_text)
+
+    draw.text((bar_x0, progress_y), "Прогресс", font=progress_font, fill=color_muted2)
     draw.rounded_rectangle((bar_x0, bar_y0, bar_x0 + bar_w, bar_y0 + bar_h), radius=r, fill=color_card2)
     fill_w = int(bar_w * max(0.0, min(1.0, completion_val)))
     if fill_w > 0:
@@ -5406,11 +5485,14 @@ def render_month_report_png(
             service_date = dt.date.fromisoformat(str(s["service_date"]))
         except Exception:
             continue
+        weekly_min_for_service = float(s["weekly_min_needed"] or 0.0)
         service_items.append(
             {
                 "date": service_date,
                 "total": total,
                 "status": str(s["mnsps_status"] or ""),
+                "weekly_min_needed": weekly_min_for_service,
+                "is_collected": weekly_min_for_service <= 0 or total >= weekly_min_for_service,
             }
         )
     max_total = max([it["total"] for it in service_items], default=0.0)
@@ -5434,7 +5516,7 @@ def render_month_report_png(
             bar_x = chart_x0 + bar_gap + idx * (bar_w + bar_gap)
             bar_h = int((item["total"] / max_total) * plot_h)
 
-            status_ok = (item["status"] == "Собрана")
+            status_ok = bool(item.get("is_collected"))
             bar_color = color_accent if status_ok else color_danger
 
             draw.rounded_rectangle(
