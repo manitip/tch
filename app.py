@@ -2774,6 +2774,11 @@ def fmt_money(x: float) -> str:
     return s
 
 
+def fmt_money_commas(x: float) -> str:
+    s = f"{x:,.2f}"
+    return s.replace(".00", "")
+
+
 def fmt_percent_1(x: float) -> str:
     return f"{x * 100:.1f}%"
 
@@ -5204,10 +5209,6 @@ def render_month_report_png(
     color_warn = (245, 158, 11)          # amber
     color_warn_soft = (254, 243, 199)
 
-    # RGBA холст для мягких теней
-    bg = Image.new("RGBA", (w, h), (*color_bg, 255))
-    draw = ImageDraw.Draw(bg)
-
     # типографика
     font_title = load_ttf_font(ImageFont, size=int(44 * scale), bold=True)
     font_kpi_value = load_ttf_font(ImageFont, size=int(34 * scale), bold=True)
@@ -5220,14 +5221,52 @@ def render_month_report_png(
     gap = int(20 * scale)
     radius = int(18 * scale)
 
+    # dynamic height for text-heavy blocks (plan + expense structure)
+    plan_items = [
+        ("МНСП", fmt_money(float(summary.get("monthly_min_needed") or 0.0))),
+        ("Выполнение МНСП", fmt_percent_1(float(summary.get("monthly_completion") or 0.0))),
+        ("СДДР", fmt_money(float(summary.get("sddr") or 0.0))),
+        ("К прошлому месяцу", f"{float(summary.get('psdpm') or 0.0) * 100:.1f}%"),
+        ("Среднее пожертвование", fmt_money(float(summary.get("avg_sunday") or 0.0))),
+    ]
+
+    kpi_y = margin + int(64 * scale)
+    kpi_h = int(148 * scale)
+    section_y = kpi_y + kpi_h + int(30 * scale)
+    footer_h = int(36 * scale)
+    left_w = int(w * 0.40)
+
+    tmp_img = Image.new("RGBA", (32, 32), (0, 0, 0, 0))
+    tmp_draw = ImageDraw.Draw(tmp_img)
+    progress_font = load_ttf_font(ImageFont, size=max(11, int(13 * scale)), bold=False)
+    _, progress_label_h = text_bbox(tmp_draw, "Прогресс", progress_font)
+    body_line_h = text_bbox(tmp_draw, "Ag", font_body)[1]
+
+    plan_rows_h = len(plan_items) * max(body_line_h + int(6 * scale), int(20 * scale))
+    plan_min_h = int(56 * scale) + plan_rows_h + int(12 * scale) + progress_label_h + max(int(4 * scale), int(6 * scale)) + max(8, int(10 * scale)) + int(18 * scale)
+    plan_target_h = max(int(252 * scale), plan_min_h)
+
+    legend_rows = min(6, max(1, len([c for c in top_categories if float(c.get("sum") or 0.0) > 0.0])))
+    legend_h = int(8 * scale) + legend_rows * int(24 * scale)
+    expenses_target_h = max(int(220 * scale), int(52 * scale) + legend_h + int(16 * scale))
+
+    top_h_min = max(int(280 * scale), plan_target_h + gap + expenses_target_h)
+    list_card_min_h = max(int(180 * scale), int(220 * scale))
+    required_content_h = top_h_min + gap + list_card_min_h
+    required_h = section_y + required_content_h + footer_h + margin
+    if required_h > h:
+        h = required_h
+
+    # RGBA холст для мягких теней
+    bg = Image.new("RGBA", (w, h), (*color_bg, 255))
+    draw = ImageDraw.Draw(bg)
+
     # title
     month_name = RU_MONTHS[int(month_row["month"]) - 1]
     title = f"Отчёт за {month_name} {int(month_row['year'])}"
     draw.text((margin, margin), title, font=font_title, fill=color_text)
 
     # KPI
-    kpi_y = margin + int(64 * scale)
-    kpi_h = int(148 * scale)
     kpi_w = int((w - margin * 2 - gap * 3) / 4)
 
     income = float(summary.get("month_income_sum") or 0.0)
@@ -5279,8 +5318,6 @@ def render_month_report_png(
         )
 
     # Layout columns
-    section_y = kpi_y + kpi_h + int(30 * scale)
-    footer_h = int(36 * scale)
     content_h = h - section_y - footer_h - margin
 
     left_w = int(w * 0.40)
@@ -5292,7 +5329,7 @@ def render_month_report_png(
     top_h = max(content_h - list_card_h - gap, int(280 * scale))
 
     # --- PLAN CARD (с прогресс-баром) ---
-    plan_h = min(int(252 * scale), int(top_h * 0.52))
+    plan_h = max(plan_target_h, int(top_h * 0.52))
     plan_card = (left_x, section_y, left_x + left_w, section_y + plan_h)
     draw_card(bg, plan_card, radius, color_card, shadow_alpha=38, shadow_blur=int(18 * scale), shadow_offset=(0, int(10 * scale)))
     draw.text((left_x + int(18 * scale), section_y + int(16 * scale)), "План/цели", font=font_section, fill=color_text)
@@ -5427,9 +5464,16 @@ def render_month_report_png(
 
         # center text
         center_label = "Итого"
-        center_value = fmt_money(total_expenses)
+        center_value = fmt_money_commas(total_expenses)
         lw, lh = text_bbox(draw, center_label, font_small)
         center_font = font_small
+        min_center_font_size = max(8, int(10 * scale))
+        for size in range(max(int(14 * scale), min_center_font_size), min_center_font_size - 1, -1):
+            candidate = load_ttf_font(ImageFont, size=size, bold=True)
+            cw, ch = text_bbox(draw, center_value, candidate)
+            if cw <= hole * 0.84 and ch <= hole * 0.44:
+                center_font = candidate
+                break
         vw, vh = text_bbox(draw, center_value, center_font)
         draw.text((cx - lw / 2, cy - (lh + vh) / 2 - int(2 * scale)), center_label, font=font_small, fill=color_muted2)
         draw.text((cx - vw / 2, cy - (lh + vh) / 2 + lh + int(1 * scale)), center_value, font=center_font, fill=color_text)
