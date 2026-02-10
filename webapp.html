@@ -5016,7 +5016,7 @@
       const sundays = State.sundayDates;
       const servicesByDate = new Map(
         State.services
-          .filter(s=> (s.income_type || "donation") === "donation")
+          .filter(s=> (s.income_type || "donation") === "donation" && (s.account || "main") === "main")
           .map(s=>[s.service_date, s])
       );
 
