@@ -5023,46 +5023,14 @@ def load_ttf_font(image_font: Any, size: int, bold: bool = False) -> Any:
             return image_font.truetype(p_str, size=size)
         except Exception:
             continue
+
     return image_font.load_default()
-
-
-def parse_iso_date(value: Any) -> Optional[dt.date]:
-    if not value:
-        return None
-    try:
-        return dt.date.fromisoformat(str(value))
-    except ValueError:
-        return None
 
 
 
 def text_bbox(draw: Any, text: str, font: Any) -> Tuple[int, int]:
-    """
-    Возвращает ширину/высоту текста c совместимостью для разных версий Pillow.
-
-    В старых версиях `ImageDraw` может не иметь `textbbox`, что вызывало 500
-    на экспорте PNG. Поэтому используем каскад fallback-ов.
-    """
-    # Pillow >= 8
-    if hasattr(draw, "textbbox"):
-        bbox = draw.textbbox((0, 0), text, font=font)
-        return bbox[2] - bbox[0], bbox[3] - bbox[1]
-
-    # Legacy Pillow
-    if hasattr(draw, "textsize"):
-        w, h = draw.textsize(text, font=font)
-        return int(w), int(h)
-
-    # На случай кастомного/ограниченного draw-объекта
-    if hasattr(font, "getbbox"):
-        bbox = font.getbbox(text)
-        return bbox[2] - bbox[0], bbox[3] - bbox[1]
-    if hasattr(font, "getsize"):
-        w, h = font.getsize(text)
-        return int(w), int(h)
-
-    # Последний fallback: приблизительная оценка
-    return max(len(text), 1) * 7, 12
+    bbox = draw.textbbox((0, 0), text, font=font)
+    return bbox[2] - bbox[0], bbox[3] - bbox[1]
 
 
 def draw_card(
@@ -5230,17 +5198,9 @@ def render_month_report_png(
     for idx, (label, value, kcol, ksoft) in enumerate(kpis):
         x0 = margin + idx * (kpi_w + gap)
         card = (x0, kpi_y, x0 + kpi_w, kpi_y + kpi_h)
-        card_fill = color_card
-        card_outline = None
-        card_outline_w = 0
-        if label == "Факт. баланс":
-            card_fill = ksoft
-            card_outline = kcol
-            card_outline_w = max(2, int(2 * scale))
         draw_card(
-            bg, card, radius, card_fill,
-            shadow_alpha=38, shadow_blur=int(18 * scale), shadow_offset=(0, int(10 * scale)),
-            outline=card_outline, outline_width=card_outline_w,
+            bg, card, radius, color_card,
+            shadow_alpha=38, shadow_blur=int(18 * scale), shadow_offset=(0, int(10 * scale))
         )
 
         # маленький акцентный индикатор слева
@@ -5280,7 +5240,7 @@ def render_month_report_png(
     top_h = max(content_h - list_card_h - gap, int(280 * scale))
 
     # --- PLAN CARD (с прогресс-баром) ---
-    plan_h = min(int(240 * scale), int(top_h * 0.5))
+    plan_h = min(int(220 * scale), int(top_h * 0.46))
     plan_card = (left_x, section_y, left_x + left_w, section_y + plan_h)
     draw_card(bg, plan_card, radius, color_card, shadow_alpha=38, shadow_blur=int(18 * scale), shadow_offset=(0, int(10 * scale)))
     draw.text((left_x + int(18 * scale), section_y + int(16 * scale)), "План/цели", font=font_section, fill=color_text)
@@ -5299,20 +5259,15 @@ def render_month_report_png(
     ]
 
     plan_y = section_y + int(56 * scale)
-    line_h = int(30 * scale)
-    label_pad = int(12 * scale)
     for idx, (label, value) in enumerate(plan_items):
-        line_y = plan_y + idx * line_h
+        line_y = plan_y + idx * int(26 * scale)
+        draw.text((left_x + int(18 * scale), line_y), label, font=font_body, fill=color_muted)
         value_w, _ = text_bbox(draw, value, font_body)
-        value_x = left_x + left_w - int(18 * scale) - value_w
-        max_label_w = max(int(value_x - left_x - label_pad), 0)
-        label_text = truncate_text(label, max_label_w, font_body)
-        draw.text((left_x + int(18 * scale), line_y), label_text, font=font_body, fill=color_muted)
-        draw.text((value_x, line_y), value, font=font_body, fill=color_text)
+        draw.text((left_x + left_w - int(18 * scale) - value_w, line_y), value, font=font_body, fill=color_text)
 
     # progress bar
     bar_x0 = left_x + int(18 * scale)
-    bar_y0 = plan_card[3] - int(32 * scale)
+    bar_y0 = plan_card[3] - int(28 * scale)
     bar_w = left_w - int(36 * scale)
     bar_h = max(8, int(10 * scale))
     r = bar_h // 2
@@ -5380,21 +5335,16 @@ def render_month_report_png(
         # donut hole
         cx = pie_x0 + pie_size / 2
         cy = pie_y0 + pie_size / 2
-        hole = pie_size * 0.64
+        hole = pie_size * 0.58
         draw.ellipse((cx - hole / 2, cy - hole / 2, cx + hole / 2, cy + hole / 2), fill=color_card)
 
         # center text
         center_label = "Итого"
         center_value = fmt_money(total_expenses)
         lw, lh = text_bbox(draw, center_label, font_small)
-        value_font = font_body
-        vw, vh = text_bbox(draw, center_value, value_font)
-        max_center_w = hole * 0.82
-        if vw > max_center_w:
-            value_font = load_ttf_font(ImageFont, size=int(12 * scale), bold=False)
-            vw, vh = text_bbox(draw, center_value, value_font)
+        vw, vh = text_bbox(draw, center_value, font_body)
         draw.text((cx - lw / 2, cy - (lh + vh) / 2 - int(2 * scale)), center_label, font=font_small, fill=color_muted2)
-        draw.text((cx - vw / 2, cy - (lh + vh) / 2 + lh + int(2 * scale)), center_value, font=value_font, fill=color_text)
+        draw.text((cx - vw / 2, cy - (lh + vh) / 2 + lh + int(2 * scale)), center_value, font=font_body, fill=color_text)
 
     # legend
     legend_x = pie_x0 + pie_size + int(16 * scale)
@@ -5443,12 +5393,9 @@ def render_month_report_png(
     service_items = []
     for s in services:
         total = float(s["total"] or 0.0)
-        service_date = parse_iso_date(s["service_date"])
-        if not service_date:
-            continue
         service_items.append(
             {
-                "date": service_date,
+                "date": dt.date.fromisoformat(s["service_date"]),
                 "total": total,
                 "status": str(s["mnsps_status"] or ""),
             }
@@ -5487,13 +5434,6 @@ def render_month_report_png(
             lw, lh = text_bbox(draw, label, font_small)
             draw.text((bar_x + (bar_w - lw) / 2, base_y + int(6 * scale)), label, font=font_small, fill=color_muted2)
 
-            value_label = fmt_money(item["total"])
-            value_w, value_h = text_bbox(draw, value_label, font_small)
-            value_x = bar_x + (bar_w - value_w) / 2
-            value_y = base_y - bar_h - int(18 * scale)
-            value_y = max(chart_y0 + int(4 * scale), value_y)
-            draw.text((value_x, value_y), value_label, font=font_small, fill=color_text)
-
         # weekly min (dashed)
         weekly_min = float(summary.get("weekly_min_needed") or 0.0)
         if weekly_min > 0:
@@ -5527,9 +5467,7 @@ def render_month_report_png(
 
         sub_income: Dict[dt.date, Dict[str, float]] = {}
         for row in subaccount_services:
-            d = parse_iso_date(row["service_date"])
-            if not d:
-                continue
+            d = dt.date.fromisoformat(row["service_date"])
             acc = str(row["account"])
             total = float(row["total"] or 0.0)
             sub_income.setdefault(d, {}).setdefault(acc, 0.0)
@@ -5583,8 +5521,7 @@ def render_month_report_png(
 
     expense_items: List[str] = []
     for row in expenses:
-        date_value = parse_iso_date(row["expense_date"])
-        date = date_value.strftime("%d.%m") if date_value else "—"
+        date = dt.date.fromisoformat(row["expense_date"]).strftime("%d.%m")
         category = str(row["category"] or "—")
         title2 = str(row["title"] or "—")
         total2 = fmt_money(float(row["total"] or 0.0))
