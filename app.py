@@ -54,10 +54,8 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import (
     Message,
     CallbackQuery,
-    KeyboardButton,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    ReplyKeyboardMarkup,
     WebAppInfo,
 )
 
@@ -2257,44 +2255,6 @@ def main_menu_kb(role: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def main_menu_reply_kb(role: str) -> ReplyKeyboardMarkup:
-    if role == "cash_signer":
-        cashapp_url = cashapp_webapp_url()
-        keyboard: List[List[KeyboardButton]] = []
-        if cashapp_url:
-            keyboard.append([KeyboardButton(text="Наличные / Подписи", web_app=WebAppInfo(url=cashapp_url))])
-        return ReplyKeyboardMarkup(
-            keyboard=keyboard,
-            resize_keyboard=True,
-            is_persistent=True,
-        )
-
-    webapp_url = require_https_webapp_url(CFG.WEBAPP_URL)
-    keyboard: List[List[KeyboardButton]] = []
-    if webapp_url:
-        keyboard.append([KeyboardButton(text="Открыть бухгалтерию", web_app=WebAppInfo(url=webapp_url))])
-    keyboard.extend(
-        [
-            [KeyboardButton(text="Быстрый ввод пожертвования"), KeyboardButton(text="Быстрый ввод расхода")],
-            [KeyboardButton(text="Отчёты")],
-        ]
-    )
-    if role == "admin":
-        keyboard.append([KeyboardButton(text="Настройки")])
-    return ReplyKeyboardMarkup(
-        keyboard=keyboard,
-        resize_keyboard=True,
-        is_persistent=True,
-    )
-
-
-async def send_main_menu(message: Message, role: str) -> None:
-    await message.answer(
-        "Меню бухгалтерии:",
-        reply_markup=main_menu_reply_kb(role),
-    )
-
-
 def confirm_kb(kind: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -2321,19 +2281,19 @@ def reports_kb() -> InlineKeyboardMarkup:
         ]
     )
 
-def webapp_url_with_screen(screen: str) -> Optional[str]:
-    url = require_https_webapp_url(CFG.WEBAPP_URL)
-    if not url:
-        return None
-    try:
-        parsed = urllib.parse.urlparse(url)
-        query = urllib.parse.parse_qs(parsed.query)
-        query["screen"] = [screen]
-        new_query = urllib.parse.urlencode(query, doseq=True)
-        return urllib.parse.urlunparse(parsed._replace(query=new_query))
-    except Exception:
-        sep = "&" if "?" in url else "?"
-        return f"{url}{sep}screen={screen}"
+    def webapp_url_with_screen(screen: str) -> Optional[str]:
+        url = require_https_webapp_url(CFG.WEBAPP_URL)
+        if not url:
+            return None
+        try:
+            parsed = urllib.parse.urlparse(url)
+            query = urllib.parse.parse_qs(parsed.query)
+            query["screen"] = [screen]
+            new_query = urllib.parse.urlencode(query, doseq=True)
+            return urllib.parse.urlunparse(parsed._replace(query=new_query))
+        except Exception:
+            sep = "&" if "?" in url else "?"
+            return f"{url}{sep}screen={screen}"
 
 def parse_quick_input(text: str) -> Optional[Dict[str, Any]]:
     """
@@ -2477,7 +2437,10 @@ async def on_start(m: Message):
         register_bot_subscriber(tid)
 
     role = get_user_role_from_db(tid)
-    await send_main_menu(m, role)
+    await m.answer(
+        "Меню бухгалтерии:",
+        reply_markup=main_menu_kb(role),
+    )
     webapp_url = require_https_webapp_url(CFG.WEBAPP_URL)
     cashapp_url = cashapp_webapp_url()
     if not webapp_url or (role == "cash_signer" and not cashapp_url):
@@ -2487,58 +2450,12 @@ async def on_start(m: Message):
         )
 
 
-@router.message(Command("menu"))
-async def on_menu(m: Message):
-    if not m.from_user:
-        return
-    tid = m.from_user.id
-    if not is_allowed_telegram_user(tid):
-        return
-    role = get_user_role_from_db(tid)
-    await send_main_menu(m, role)
-
-
 @router.message(F.text)
 async def on_text(m: Message):
     if not m.from_user or not m.text:
         return
     tid = m.from_user.id
     if not is_allowed_telegram_user(tid):
-        return
-
-    role = get_user_role_from_db(tid)
-    text = (m.text or "").strip()
-
-    if text == "Меню бухгалтерии":
-        await send_main_menu(m, role)
-        return
-
-    if text == "Быстрый ввод пожертвования":
-        await m.answer("Отправьте сообщением: `пож 8500 4800` (безнал нал)", parse_mode="Markdown")
-        return
-
-    if text == "Быстрый ввод расхода":
-        await m.answer("Отправьте сообщением: `расход 2500 зал`", parse_mode="Markdown")
-        return
-
-    if text == "Отчёты":
-        await m.answer("Отчёты:", reply_markup=reports_kb())
-        return
-
-    if text == "Настройки":
-        if role != "admin":
-            await m.answer("Нет доступа")
-            return
-        settings_url = webapp_url_with_screen("settings")
-        inline_keyboard = []
-        if settings_url:
-            inline_keyboard.append(
-                [InlineKeyboardButton(text="Открыть настройки (WebApp)", web_app=WebAppInfo(url=settings_url))]
-            )
-        await m.answer(
-            "Настройки:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=inline_keyboard),
-        )
         return
 
     parsed = parse_quick_input(m.text)
