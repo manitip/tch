@@ -5037,8 +5037,32 @@ def parse_iso_date(value: Any) -> Optional[dt.date]:
 
 
 def text_bbox(draw: Any, text: str, font: Any) -> Tuple[int, int]:
-    bbox = draw.textbbox((0, 0), text, font=font)
-    return bbox[2] - bbox[0], bbox[3] - bbox[1]
+    """
+    Возвращает ширину/высоту текста c совместимостью для разных версий Pillow.
+
+    В старых версиях `ImageDraw` может не иметь `textbbox`, что вызывало 500
+    на экспорте PNG. Поэтому используем каскад fallback-ов.
+    """
+    # Pillow >= 8
+    if hasattr(draw, "textbbox"):
+        bbox = draw.textbbox((0, 0), text, font=font)
+        return bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+    # Legacy Pillow
+    if hasattr(draw, "textsize"):
+        w, h = draw.textsize(text, font=font)
+        return int(w), int(h)
+
+    # На случай кастомного/ограниченного draw-объекта
+    if hasattr(font, "getbbox"):
+        bbox = font.getbbox(text)
+        return bbox[2] - bbox[0], bbox[3] - bbox[1]
+    if hasattr(font, "getsize"):
+        w, h = font.getsize(text)
+        return int(w), int(h)
+
+    # Последний fallback: приблизительная оценка
+    return max(len(text), 1) * 7, 12
 
 
 def draw_card(
