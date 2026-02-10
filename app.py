@@ -5198,9 +5198,14 @@ def render_month_report_png(
     for idx, (label, value, kcol, ksoft) in enumerate(kpis):
         x0 = margin + idx * (kpi_w + gap)
         card = (x0, kpi_y, x0 + kpi_w, kpi_y + kpi_h)
+        is_fact_balance = (label == "Факт. баланс")
+        card_fill = (245, 255, 250) if is_fact_balance and fbal >= 0 else ((255, 246, 246) if is_fact_balance else color_card)
+        card_outline = kcol if is_fact_balance else None
+        card_outline_width = max(2, int(2 * scale)) if is_fact_balance else 0
         draw_card(
-            bg, card, radius, color_card,
-            shadow_alpha=38, shadow_blur=int(18 * scale), shadow_offset=(0, int(10 * scale))
+            bg, card, radius, card_fill,
+            shadow_alpha=38, shadow_blur=int(18 * scale), shadow_offset=(0, int(10 * scale)),
+            outline=card_outline, outline_width=card_outline_width,
         )
 
         # маленький акцентный индикатор слева
@@ -5259,8 +5264,11 @@ def render_month_report_png(
     ]
 
     plan_y = section_y + int(56 * scale)
+    plan_bottom_padding = int(52 * scale)
+    plan_available_h = max(int(20 * scale), plan_h - int(56 * scale) - plan_bottom_padding)
+    plan_row_h = max(int(20 * scale), int(plan_available_h / max(1, len(plan_items))))
     for idx, (label, value) in enumerate(plan_items):
-        line_y = plan_y + idx * int(26 * scale)
+        line_y = plan_y + idx * plan_row_h
         draw.text((left_x + int(18 * scale), line_y), label, font=font_body, fill=color_muted)
         value_w, _ = text_bbox(draw, value, font_body)
         draw.text((left_x + left_w - int(18 * scale) - value_w, line_y), value, font=font_body, fill=color_text)
@@ -5302,7 +5310,7 @@ def render_month_report_png(
     pie_top = expenses_card_y + int(52 * scale)
     pie_area_h = expenses_card[3] - pie_top - int(16 * scale)
 
-    pie_size = min(int(left_w * 0.48), pie_area_h)
+    pie_size = min(int(left_w * 0.46), pie_area_h)
     pie_x0 = left_x + pie_pad
     pie_y0 = pie_top + int((pie_area_h - pie_size) / 2)
     pie_box = (pie_x0, pie_y0, pie_x0 + pie_size, pie_y0 + pie_size)
@@ -5335,16 +5343,17 @@ def render_month_report_png(
         # donut hole
         cx = pie_x0 + pie_size / 2
         cy = pie_y0 + pie_size / 2
-        hole = pie_size * 0.58
+        hole = pie_size * 0.66
         draw.ellipse((cx - hole / 2, cy - hole / 2, cx + hole / 2, cy + hole / 2), fill=color_card)
 
         # center text
         center_label = "Итого"
         center_value = fmt_money(total_expenses)
         lw, lh = text_bbox(draw, center_label, font_small)
-        vw, vh = text_bbox(draw, center_value, font_body)
+        center_font = font_small
+        vw, vh = text_bbox(draw, center_value, center_font)
         draw.text((cx - lw / 2, cy - (lh + vh) / 2 - int(2 * scale)), center_label, font=font_small, fill=color_muted2)
-        draw.text((cx - vw / 2, cy - (lh + vh) / 2 + lh + int(2 * scale)), center_value, font=font_body, fill=color_text)
+        draw.text((cx - vw / 2, cy - (lh + vh) / 2 + lh + int(1 * scale)), center_value, font=center_font, fill=color_text)
 
     # legend
     legend_x = pie_x0 + pie_size + int(16 * scale)
@@ -5393,9 +5402,13 @@ def render_month_report_png(
     service_items = []
     for s in services:
         total = float(s["total"] or 0.0)
+        try:
+            service_date = dt.date.fromisoformat(str(s["service_date"]))
+        except Exception:
+            continue
         service_items.append(
             {
-                "date": dt.date.fromisoformat(s["service_date"]),
+                "date": service_date,
                 "total": total,
                 "status": str(s["mnsps_status"] or ""),
             }
@@ -5415,7 +5428,7 @@ def render_month_report_png(
         n = max(1, len(service_items))
         bar_gap = max(6, int(10 * scale))
         bar_w = max(10, int((chart_w - bar_gap * (n + 1)) / n))
-        bar_r = max(3, int(bar_w / 2))
+        bar_r = max(4, int(min(bar_w * 0.22, 12 * scale)))
 
         for idx, item in enumerate(service_items):
             bar_x = chart_x0 + bar_gap + idx * (bar_w + bar_gap)
@@ -5429,6 +5442,11 @@ def render_month_report_png(
                 radius=bar_r,
                 fill=bar_color,
             )
+
+            value_label = fmt_money(item["total"])
+            val_w, val_h = text_bbox(draw, value_label, font_small)
+            val_y = max(chart_y0 + int(6 * scale), base_y - bar_h - val_h - int(4 * scale))
+            draw.text((bar_x + (bar_w - val_w) / 2, val_y), value_label, font=font_small, fill=color_text)
 
             label = item["date"].strftime("%d.%m")
             lw, lh = text_bbox(draw, label, font_small)
@@ -5467,7 +5485,10 @@ def render_month_report_png(
 
         sub_income: Dict[dt.date, Dict[str, float]] = {}
         for row in subaccount_services:
-            d = dt.date.fromisoformat(row["service_date"])
+            try:
+                d = dt.date.fromisoformat(str(row["service_date"]))
+            except Exception:
+                continue
             acc = str(row["account"])
             total = float(row["total"] or 0.0)
             sub_income.setdefault(d, {}).setdefault(acc, 0.0)
@@ -5521,7 +5542,10 @@ def render_month_report_png(
 
     expense_items: List[str] = []
     for row in expenses:
-        date = dt.date.fromisoformat(row["expense_date"]).strftime("%d.%m")
+        try:
+            date = dt.date.fromisoformat(str(row["expense_date"])).strftime("%d.%m")
+        except Exception:
+            date = "—"
         category = str(row["category"] or "—")
         title2 = str(row["title"] or "—")
         total2 = fmt_money(float(row["total"] or 0.0))
