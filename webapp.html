@@ -3637,33 +3637,6 @@
       return prefersReducedMotion ? "auto" : "smooth";
     }
 
-    function scrollToTopExact(target){
-      if (!target) return;
-      const behavior = settingsScrollBehavior();
-      const withSmooth = behavior === "smooth";
-      const scrollTarget = target === window
-        ? ()=> window.scrollTo({top: 0, left: 0, behavior})
-        : ()=> target.scrollTo({top: 0, left: 0, behavior});
-      const forceTop = ()=> {
-        if (target === window){
-          window.scrollTo({top: 0, left: 0, behavior: "auto"});
-          return;
-        }
-        target.scrollTop = 0;
-        target.scrollLeft = 0;
-      };
-
-      scrollTarget();
-      if (!withSmooth){
-        forceTop();
-        return;
-      }
-      requestAnimationFrame(()=> {
-        scrollTarget();
-        setTimeout(forceTop, 220);
-      });
-    }
-
     async function ensureSettingsData({force=false}={}){
       const canUseCache = !force && State.settingsData && (Date.now() - State.settingsLoadedAt < SETTINGS_CACHE_TTL_MS);
       if (canUseCache) return State.settingsData;
@@ -7480,9 +7453,11 @@
       }
       panel.classList.remove("hidden");
       panel.setAttribute("aria-hidden", "false");
+      body.scrollTop = 0;
       requestAnimationFrame(()=> panel.classList.add("open"));
-      scrollToTopExact(window);
+      window.scrollTo({top: 0, left: 0, behavior: settingsScrollBehavior()});
       resetPanelScroll();
+      if (active) active.scrollIntoView({block: "start", inline: "nearest", behavior: settingsScrollBehavior()});
       if (sectionId === "cashflowSection"){
         setCashflowTab("requests");
         loadCashflowRequests().catch(()=> {});
@@ -7509,11 +7484,6 @@
         });
         State.settingsPage = null;
         window.scrollTo({top: State.settingsScroll.menu || 0, left: 0, behavior: settingsScrollBehavior()});
-        if (settingsScrollBehavior() === "smooth"){
-          window.setTimeout(()=> {
-            window.scrollTo({top: State.settingsScroll.menu || 0, left: 0, behavior: "auto"});
-          }, 220);
-        }
       };
       if (immediate){
         panel.classList.remove("open");
