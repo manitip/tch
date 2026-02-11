@@ -1189,6 +1189,15 @@
       display:flex;
       flex-direction:column;
       gap: 12px;
+      transition: filter .22s ease, opacity .22s ease, transform .22s ease;
+      transform-origin: center top;
+    }
+    #settingsWrap.panelOpen #settingsMenu{
+      filter: blur(8px);
+      opacity: .55;
+      transform: scale(.985);
+      pointer-events: none;
+      user-select: none;
     }
     .settingsMenuHeader{
       display:flex;
@@ -1375,6 +1384,11 @@
     .screen.active{
       display:block;
       animation: screenIn .20s ease forwards;
+    }
+    #screenSettings.active{
+      animation: none;
+      opacity: 1;
+      transform: none;
     }
     @keyframes screenIn{
       to { opacity: 1; transform: translateX(0); }
@@ -7453,6 +7467,7 @@
       }
       panel.classList.remove("hidden");
       panel.setAttribute("aria-hidden", "false");
+      $("#settingsWrap")?.classList.add("panelOpen");
       body.scrollTop = 0;
       requestAnimationFrame(()=> panel.classList.add("open"));
       window.scrollTo({top: 0, left: 0, behavior: settingsScrollBehavior()});
@@ -7478,6 +7493,7 @@
       const finish = ()=>{
         panel.classList.add("hidden");
         panel.setAttribute("aria-hidden", "true");
+        $("#settingsWrap")?.classList.remove("panelOpen");
         $$("#settingsSectionsHost .section").forEach((sec)=>{
           sec.classList.add("hidden");
           sec.classList.remove("activePage");
