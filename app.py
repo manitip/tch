@@ -2253,7 +2253,9 @@ async def configure_persistent_menu(chat_id: int, role: str) -> None:
 
 
 def main_menu_kb(role: str) -> InlineKeyboardMarkup:
-    if role == "cash_signer":
+    # Для администратора и подписанта используем только постоянную кнопку
+    # в нижнем меню Telegram, без дублирования кнопок в чате.
+    if role in ("admin", "cash_signer"):
         return InlineKeyboardMarkup(inline_keyboard=[])
 
     buttons = [
