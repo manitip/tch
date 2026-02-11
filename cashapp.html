@@ -22,7 +22,7 @@
       --muted:rgba(255,255,255,.65);
       --muted2:rgba(255,255,255,.45);
       --line:rgba(255,255,255,.10);
-      --shadow: 0 18px 40px rgba(0,0,0,.40);
+      --shadow: 0 10px 30px rgba(0,0,0,.30);
       --primary:#10b981;
       --primary2:#34d399;
       --danger:#fb7185;
@@ -39,31 +39,25 @@
     }
 
     [data-theme="light"]{
-      --bg:#f8fafc;
+      --bg:#f4f6fa;
       --card:#ffffff;
-      --card2:#f1f5f9;
-      --text:#0f172a;
-      --muted:#475569;
-      --muted2:#64748b;
-      --line:rgba(15,23,42,.08);
-      --shadow: 0 16px 30px rgba(15,23,42,.10);
-      --primary:#0ea5e9;
-      --primary2:#38bdf8;
+      --card2:#eef2f7;
+      --text:#111827;
+      --muted:#4b5563;
+      --muted2:#6b7280;
+      --line:rgba(15,23,42,.12);
+      --shadow: 0 10px 24px rgba(15,23,42,.10);
+      --primary:#10b981;
+      --primary2:#34d399;
       --danger:#ef4444;
       --warn:#f59e0b;
 
-      --overlay: rgba(248,250,252,.72);
+      --overlay: rgba(244,246,250,.72);
       --overlay2: rgba(15,23,42,.20);
 
       --tap: rgba(15,23,42,.06);
       --signature-bg: #ffffff;
       --signature-stroke: #0f172a;
-    }
-
-    [data-theme="light"] body{
-      background: radial-gradient(900px 600px at 10% -10%, rgba(56,189,248,.22), transparent 60%),
-                  radial-gradient(900px 600px at 100% 0%, rgba(16,185,129,.12), transparent 62%),
-                  var(--bg);
     }
 
     .material-symbols-rounded{
@@ -77,9 +71,7 @@
     body{
       margin:0;
       font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, "Apple Color Emoji","Segoe UI Emoji";
-      background: radial-gradient(900px 600px at 20% -10%, rgba(16,185,129,.18), transparent 60%),
-                  radial-gradient(900px 600px at 90% 0%, rgba(52,211,153,.16), transparent 62%),
-                  var(--bg);
+      background: var(--bg);
       color:var(--text);
     }
     .wrap{
@@ -180,7 +172,7 @@
       transition: transform .12s ease, background .12s ease, color .12s ease;
     }
     .themePill.active{
-      background: linear-gradient(180deg, var(--primary), var(--primary2));
+      background: var(--primary);
       color: #fff;
       border-color: transparent;
     }
@@ -218,7 +210,7 @@
       color: var(--text);
       background: rgba(16,185,129,.16);
       border: 1px solid rgba(16,185,129,.25);
-      box-shadow: 0 10px 18px rgba(16,185,129,.12);
+      box-shadow: none;
     }
 
     .row{
@@ -318,9 +310,9 @@
       white-space:nowrap;
     }
     .btnPrimary{
-      background: linear-gradient(180deg, var(--primary), var(--primary2));
+      background: var(--primary);
       color:#fff;
-      box-shadow: 0 14px 26px rgba(21,185,129,.25);
+      box-shadow: none;
     }
     .btnGhost{
       background: var(--card);
