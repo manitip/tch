@@ -86,6 +86,7 @@ ALLOWED_ATTACHMENT_MIME_TYPES = {
 }
 MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 MAX_ATTACHMENTS_PER_EXPENSE = 10
+MAX_BACKUP_UPLOAD_BYTES = 200 * 1024 * 1024
 ACCOUNTS = ("main", "praise", "alpha")
 
 # ---------------------------
@@ -1308,10 +1309,22 @@ def verify_session_token(token: str, secret: str) -> Dict[str, Any]:
         raise HTTPException(status_code=401, detail="Invalid token format")
 
     expected = hmac.new(secret.encode("utf-8"), body.encode("utf-8"), hashlib.sha256).digest()
-    if not hmac.compare_digest(_b64url_decode(sig), expected):
+    try:
+        provided_sig = _b64url_decode(sig)
+    except Exception:
         raise HTTPException(status_code=401, detail="Invalid token signature")
 
-    payload = json.loads(_b64url_decode(body).decode("utf-8"))
+    if not hmac.compare_digest(provided_sig, expected):
+        raise HTTPException(status_code=401, detail="Invalid token signature")
+
+    try:
+        payload = json.loads(_b64url_decode(body).decode("utf-8"))
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token payload")
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=401, detail="Invalid token payload")
+
     exp = int(payload.get("exp", 0))
     if exp and int(time.time()) > exp:
         raise HTTPException(status_code=401, detail="Token expired")
@@ -3322,9 +3335,20 @@ async def lifespan(app: FastAPI):
 
 APP = FastAPI(title="Church Accounting Bot", version="1.0.0", lifespan=lifespan)
 
+
+def _build_cors_allow_origins() -> List[str]:
+    origins: List[str] = ["http://localhost", "http://localhost:8000"]
+    for candidate in (CFG.APP_URL, CFG.WEBAPP_URL):
+        value = (candidate or "").strip()
+        if not value or value == "*":
+            continue
+        if value not in origins:
+            origins.append(value)
+    return origins
+
 APP.add_middleware(
     CORSMiddleware,
-    allow_origins=[CFG.APP_URL, CFG.WEBAPP_URL, "http://localhost", "http://localhost:8000", "*"],
+    allow_origins=_build_cors_allow_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -4945,10 +4969,14 @@ async def api_restore_backup(
     backup_db_path = None
     try:
         with temp_file.open("wb") as f:
+            total_written = 0
             while True:
                 chunk = await file.read(1024 * 1024)
                 if not chunk:
                     break
+                total_written += len(chunk)
+                if total_written > MAX_BACKUP_UPLOAD_BYTES:
+                    raise HTTPException(status_code=413, detail="Backup file is too large")
                 f.write(chunk)
         if temp_file.stat().st_size == 0:
             raise HTTPException(status_code=400, detail="Empty file")
