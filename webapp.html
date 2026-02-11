@@ -7425,8 +7425,19 @@
       }
       panel.classList.remove("hidden");
       panel.setAttribute("aria-hidden", "false");
-      body.scrollTop = 0;
+      body.scrollTop = State.settingsScroll.page || 0;
       requestAnimationFrame(()=> panel.classList.add("open"));
+      window.scrollTo({top: 0, left: 0, behavior: "auto"});
+      resetPanelScroll();
+      if (active) active.scrollIntoView({block: "start", inline: "nearest"});
+      requestAnimationFrame(()=> {
+        panel.classList.add("open");
+        resetPanelScroll();
+      });
+      setTimeout(()=>{
+        window.scrollTo({top: 0, left: 0, behavior: "auto"});
+        resetPanelScroll();
+      }, 120);
       if (sectionId === "cashflowSection"){
         setCashflowTab("requests");
         loadCashflowRequests().catch(()=> {});
