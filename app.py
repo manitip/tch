@@ -56,8 +56,6 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
     WebAppInfo,
 )
 
@@ -2086,29 +2084,9 @@ class AuthTelegramIn(BaseModel):
     initData: str = Field(..., description="Telegram WebApp initData string")
 
 
-class AuthTelegramUnsafeIn(BaseModel):
-    telegram_id: int = Field(..., gt=0, description="Telegram user id from initDataUnsafe")
-
-
 class AuthOut(BaseModel):
     token: str
     user: Dict[str, Any]
-
-
-def auth_trace(event: str, request: Request, **details: Any) -> None:
-    """Lightweight auth diagnostics to stdout for local debugging."""
-    client_host = request.client.host if request.client else "-"
-    payload = {
-        "event": event,
-        "path": request.url.path,
-        "client": client_host,
-        "ua": (request.headers.get("user-agent") or "")[:140],
-        "has_auth": bool(request.headers.get("authorization")),
-        "has_x_tg_webapp": bool(request.headers.get("x-telegram-webapp")),
-        "has_x_tg_init": bool(request.headers.get("x-telegram-init-data")),
-    }
-    payload.update(details)
-    print(f"[AUTH] {payload}")
 
 
 def get_bearer_token(request: Request) -> str:
@@ -2116,13 +2094,9 @@ def get_bearer_token(request: Request) -> str:
     if not h.lower().startswith("bearer "):
         token = request.query_params.get("token", "").strip()
         if token:
-            auth_trace("bearer_from_query", request)
             return token
-        auth_trace("missing_bearer", request)
         raise HTTPException(status_code=401, detail="Missing Authorization Bearer token")
-    token = h.split(" ", 1)[1].strip()
-    auth_trace("bearer_from_header", request, token_len=len(token))
-    return token
+    return h.split(" ", 1)[1].strip()
 
 
 def get_current_user(request: Request) -> sqlite3.Row:
@@ -2147,23 +2121,6 @@ def require_role(*allowed_roles: str):
             raise HTTPException(status_code=403, detail="Insufficient role")
         return u
     return _dep
-
-
-def issue_session_token_for_user(telegram_id: int) -> Dict[str, Any]:
-    refresh_allowlist_if_needed()
-    u = db_fetchone("SELECT * FROM users WHERE telegram_id=?;", (int(telegram_id),))
-    if not u or int(u["active"]) != 1:
-        raise HTTPException(status_code=403, detail="User inactive")
-    exp = int(time.time()) + 7 * 24 * 3600
-    token = make_session_token(
-        {
-            "telegram_id": int(telegram_id),
-            "role": str(u["role"]),
-            "exp": exp,
-        },
-        CFG.SESSION_SECRET,
-    )
-    return {"token": token, "user": {"telegram_id": int(telegram_id), "name": u["name"], "role": u["role"]}}
 
 
 # ---------------------------
@@ -2296,29 +2253,6 @@ def main_menu_kb(role: str) -> InlineKeyboardMarkup:
     if role == "admin":
         buttons.append([InlineKeyboardButton(text="Настройки", callback_data="menu:settings")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-
-def persistent_menu_kb(role: str) -> Optional[ReplyKeyboardMarkup]:
-    if role == "cash_signer":
-        cashapp_url = cashapp_webapp_url()
-        if not cashapp_url:
-            return None
-        return ReplyKeyboardMarkup(
-            keyboard=[[KeyboardButton(text="Наличные / Подписи", web_app=WebAppInfo(url=cashapp_url))]],
-            resize_keyboard=True,
-            is_persistent=True,
-        )
-
-    if role in {"admin", "accountant"}:
-        webapp_url = require_https_webapp_url(CFG.WEBAPP_URL)
-        if not webapp_url:
-            return None
-        return ReplyKeyboardMarkup(
-            keyboard=[[KeyboardButton(text="Открыть бухгалтерию", web_app=WebAppInfo(url=webapp_url))]],
-            resize_keyboard=True,
-            is_persistent=True,
-        )
-    return None
 
 
 def confirm_kb(kind: str) -> InlineKeyboardMarkup:
@@ -2503,10 +2437,9 @@ async def on_start(m: Message):
         register_bot_subscriber(tid)
 
     role = get_user_role_from_db(tid)
-    persistent_menu = persistent_menu_kb(role)
     await m.answer(
         "Меню бухгалтерии:",
-        reply_markup=persistent_menu or main_menu_kb(role),
+        reply_markup=main_menu_kb(role),
     )
     webapp_url = require_https_webapp_url(CFG.WEBAPP_URL)
     cashapp_url = cashapp_webapp_url()
@@ -3424,7 +3357,6 @@ def cashapp():
 
 @APP.post("/api/auth/telegram", response_model=AuthOut)
 def auth_telegram(body: AuthTelegramIn, request: Request):
-    auth_trace("auth_telegram_start", request, initData_len=len(body.initData or ""))
     user_obj = validate_telegram_init_data(body.initData, CFG.BOT_TOKEN)
     telegram_id = int(user_obj.get("id", 0))
     if not telegram_id:
@@ -3433,41 +3365,26 @@ def auth_telegram(body: AuthTelegramIn, request: Request):
     allow = refresh_allowlist_if_needed()
     allow_user = allow.get(telegram_id)
     if not allow_user or not allow_user.get("active"):
-        auth_trace("auth_telegram_forbidden", request, telegram_id=telegram_id)
         raise HTTPException(status_code=403, detail="User not in allowlist or inactive")
 
     # sync single user from allowlist (in case file changed)
     sync_allowlist_to_db({telegram_id: allow_user})
 
-    auth_trace("auth_telegram_ok", request, telegram_id=telegram_id)
-    return issue_session_token_for_user(telegram_id)
+    u = db_fetchone("SELECT * FROM users WHERE telegram_id=?;", (telegram_id,))
+    if not u or int(u["active"]) != 1:
+        raise HTTPException(status_code=403, detail="User inactive")
 
-
-@APP.post("/api/auth/telegram/unsafe", response_model=AuthOut)
-def auth_telegram_unsafe(body: AuthTelegramUnsafeIn, request: Request):
-    telegram_id = int(body.telegram_id)
-    auth_trace("auth_telegram_unsafe_start", request, telegram_id=telegram_id)
-    allow = refresh_allowlist_if_needed()
-    allow_user = allow.get(telegram_id)
-    if not allow_user or not allow_user.get("active"):
-        auth_trace("auth_telegram_unsafe_forbidden", request, telegram_id=telegram_id)
-        raise HTTPException(status_code=403, detail="User not in allowlist or inactive")
-
-    # sync single user from allowlist (in case file changed)
-    sync_allowlist_to_db({telegram_id: allow_user})
-
-    ua = (request.headers.get("user-agent") or "").lower()
-    has_tg_hint = (
-        "telegram" in ua
-        or bool(request.headers.get("x-telegram-init-data"))
-        or bool(request.headers.get("x-telegram-webapp"))
+    # session token
+    exp = int(time.time()) + 7 * 24 * 3600
+    token = make_session_token(
+        {
+            "telegram_id": telegram_id,
+            "role": str(u["role"]),
+            "exp": exp,
+        },
+        CFG.SESSION_SECRET,
     )
-    if not has_tg_hint:
-        auth_trace("auth_telegram_unsafe_no_tg_hint", request, telegram_id=telegram_id)
-        raise HTTPException(status_code=401, detail="Unsafe auth is allowed only from Telegram client")
-
-    auth_trace("auth_telegram_unsafe_ok", request, telegram_id=telegram_id)
-    return issue_session_token_for_user(telegram_id)
+    return {"token": token, "user": {"telegram_id": telegram_id, "name": u["name"], "role": u["role"]}}
 
 
 @APP.get("/api/me")

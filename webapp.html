@@ -1434,10 +1434,6 @@
     .dropdown.open{
       z-index: 5;
     }
-    .dropdown.dropdownOverlay,
-    .dropdown.dropdownOverlay.open{
-      z-index: 1200;
-    }
     .dropdownTrigger{
       width: 100%;
       border-radius: 16px;
@@ -1569,6 +1565,42 @@
       color: rgba(16,185,129,.95);
     }
 
+    .cashflowActTable{
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+      min-width: 520px;
+      font-size: 13px;
+    }
+    .cashflowActTable th,
+    .cashflowActTable td{
+      padding: 10px 8px;
+      border-bottom: 1px solid var(--stroke);
+      text-align: left;
+      vertical-align: top;
+    }
+    .cashflowActTable th{
+      color: var(--muted);
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .cashflowActTable td:nth-child(3),
+    .cashflowActTable td:nth-child(4),
+    .cashflowActTable td:nth-child(5),
+    .cashflowActTable td:nth-child(6){
+      white-space: normal;
+      word-break: break-word;
+    }
+    .cashflowActTable th:nth-child(2),
+    .cashflowActTable td:nth-child(2){
+      text-align: right;
+    }
+    .sigCell{
+      display:flex;
+      flex-direction:column;
+      gap: 6px;
+      align-items:flex-start;
+    }
     .cashflowActList{
       display:flex;
       flex-direction:column;
@@ -2561,7 +2593,7 @@
           <div class="grid2">
             <div class="field">
               <label>Месяц</label>
-              <div id="histMonthDropdown" class="dropdown dropdownOverlay">
+              <div id="histMonthDropdown" class="dropdown">
                 <button type="button" class="dropdownTrigger" aria-haspopup="listbox" aria-expanded="false">
                   <span class="dropdownValue">—</span>
                   <span class="icon">expand_more</span>
@@ -2572,7 +2604,7 @@
             </div>
             <div class="field" id="histCatWrap">
               <label>Категория</label>
-              <div id="histCategoryDropdown" class="dropdown dropdownOverlay">
+              <div id="histCategoryDropdown" class="dropdown">
                 <button type="button" class="dropdownTrigger" aria-haspopup="listbox" aria-expanded="false">
                   <span class="dropdownValue">—</span>
                   <span class="icon">expand_more</span>
@@ -2986,6 +3018,23 @@
                         </button>
                       </div>
                       <div class="spacer12"></div>
+                      <div style="overflow:auto;">
+                        <table class="cashflowActTable">
+                          <thead>
+                            <tr>
+                              <th>Дата</th>
+                              <th>Операция</th>
+                              <th>Сумма</th>
+                              <th>ФИО</th>
+                              <th>Тип пользователя</th>
+                              <th>Подпись</th>
+                            </tr>
+                          </thead>
+                          <tbody id="cashflowActBody">
+                            <tr><td colspan="6" class="muted2">Нет данных.</td></tr>
+                          </tbody>
+                        </table>
+                      </div>
                       <div id="cashflowActList" class="cashflowActList"></div>
                       <div id="cashflowActEmpty" class="tiny muted2">Нет данных.</div>
                     </div>
@@ -3147,25 +3196,11 @@
           <div class="grid2">
             <div class="field">
               <label>Год</label>
-              <div id="yearSelectDropdown" class="dropdown">
-                <button type="button" class="dropdownTrigger" aria-haspopup="listbox" aria-expanded="false">
-                  <span class="dropdownValue">—</span>
-                  <span class="icon">expand_more</span>
-                </button>
-                <div class="dropdownPanel" role="listbox"></div>
-              </div>
-              <select id="yearSelect" class="input hiddenSelect" tabindex="-1" aria-hidden="true"></select>
+              <select id="yearSelect" class="input"></select>
             </div>
             <div class="field">
               <label>Месяц</label>
-              <div id="monthSelectDropdown" class="dropdown">
-                <button type="button" class="dropdownTrigger" aria-haspopup="listbox" aria-expanded="false">
-                  <span class="dropdownValue">—</span>
-                  <span class="icon">expand_more</span>
-                </button>
-                <div class="dropdownPanel" role="listbox"></div>
-              </div>
-              <select id="monthSelect" class="input hiddenSelect" tabindex="-1" aria-hidden="true"></select>
+              <select id="monthSelect" class="input"></select>
             </div>
           </div>
           <button id="applyMonthBtn" class="btn primary" type="button">
@@ -3461,105 +3496,23 @@
       token: null,
       user: null,
       baseUrl: location.origin, // same host
-      authDebugEnabled: ["1", "true", "yes", "on"].includes(
-        String(localStorage.getItem("authDebug") || new URLSearchParams(location.search).get("authDebug") || "").toLowerCase()
-      ),
-      authDebug(...args){
-        if (!API.authDebugEnabled) return;
-        console.log("[auth-debug]", ...args);
-      },
-      extractRawParam(raw, key){
-        const value = String(raw || "").replace(/^\?/, "").replace(/^#/, "");
-        if (!value) return "";
-        const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        const match = value.match(new RegExp(`(?:^|&)${escapedKey}=([^&]*)`));
-        if (!match) return "";
-        const decoded = match[1].replace(/%(?![0-9A-Fa-f]{2})/g, "%25");
-        try {
-          return decodeURIComponent(decoded);
-        } catch {
-          return decoded;
-        }
-      },
-      readInitDataFromLocation(){
-        const fromQuery = API.extractRawParam(location.search, "tgWebAppData");
-        if (fromQuery) return fromQuery;
-        return API.extractRawParam(location.hash, "tgWebAppData") || "";
-      },
-      getTelegramInitData(){
-        const tgInitData = tg?.initData || "";
-        const urlInitData = API.readInitDataFromLocation() || "";
-        const cachedInitData = sessionStorage.getItem("tgInitData") || "";
-        const initData = tgInitData || urlInitData || cachedInitData || "";
-        API.authDebug("getTelegramInitData", {
-          hasTgObject: !!tg,
-          tgInitDataLen: tgInitData.length,
-          urlInitDataLen: urlInitData.length,
-          cachedInitDataLen: cachedInitData.length,
-          selectedLen: initData.length
-        });
-        if (initData) sessionStorage.setItem("tgInitData", initData);
-        return initData;
-      },
-      applyAuthData(data){
-        API.token = data?.token || null;
-        API.user = data?.user || null;
-        if (API.token) localStorage.setItem("sessionToken", API.token);
-        if (API.user) localStorage.setItem("sessionUser", JSON.stringify(API.user));
-      },
-      async authWithUnsafeFallback(){
-        const unsafeUserId = Number(tg?.initDataUnsafe?.user?.id || 0);
-        API.authDebug("authWithUnsafeFallback:start", {
-          hasUnsafeUserId: !!unsafeUserId,
-          hasInitDataUnsafe: !!tg?.initDataUnsafe
-        });
-        if (!unsafeUserId) return null;
-        const unsafeRes = await fetch(`${API.baseUrl}/api/auth/telegram/unsafe`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Telegram-WebApp": "1",
-            "X-Telegram-Init-Data": tg?.initData || ""
-          },
-          body: JSON.stringify({ telegram_id: unsafeUserId })
-        });
-        API.authDebug("authWithUnsafeFallback:response", {
-          status: unsafeRes.status,
-          ok: unsafeRes.ok
-        });
-        if (!unsafeRes.ok) return null;
-        const unsafeData = await unsafeRes.json();
-        API.applyAuthData(unsafeData);
-        return unsafeData;
-      },
       async auth(){
-        const initData = API.getTelegramInitData();
-        if (!initData) {
-          API.authDebug("auth:no-initData -> unsafe fallback");
-          const unsafeData = await API.authWithUnsafeFallback();
-          if (unsafeData) return unsafeData;
-          throw new Error("Нет initData. Откройте через Telegram.");
-        }
-
-        const res = await fetch(`${API.baseUrl}/api/auth/telegram`, {
-          method: "POST",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({ initData })
+        const initData = tg?.initData || "";
+        if (!initData) throw new Error("Нет initData. Откройте через Telegram.");
+        const res = await fetch(`${API.baseUrl}/api/auth/telegram`,{
+          method:"POST",
+          headers: {"Content-Type":"application/json"},
+          body: JSON.stringify({initData})
         });
-        API.authDebug("auth:signed-response", { status: res.status, ok: res.ok });
-
         if (!res.ok) {
-          if (res.status === 400 || res.status === 401) {
-            API.authDebug("auth:signed failed 400/401 -> unsafe fallback");
-            const unsafeData = await API.authWithUnsafeFallback();
-            if (unsafeData) return unsafeData;
-          }
-          const t = await res.text().catch(() => "");
+          const t = await res.text().catch(()=> "");
           throw new Error(`Auth failed: ${res.status} ${t}`);
         }
-
         const data = await res.json();
-        API.applyAuthData(data);
+        API.token = data.token;
+        API.user = data.user;
+        localStorage.setItem("sessionToken", API.token);
+        localStorage.setItem("sessionUser", JSON.stringify(API.user));
         return data;
       },
       async ensureAuth(){
@@ -3606,20 +3559,8 @@
         if (API.token) headers["Authorization"] = `Bearer ${API.token}`;
         const res = await fetch(`${API.baseUrl}${path}`, { ...opts, headers });
         if (res.status === 401 || res.status === 403) {
-          const txt = await res.text().catch(()=> "");
-          API.authDebug("req:unauthorized", { path, status: res.status, detail: txt || "Unauthorized" });
-          if (!opts.__reauthTried && !path.startsWith("/api/auth/telegram")) {
-            try {
-              API.token = null;
-              localStorage.removeItem("sessionToken");
-              localStorage.removeItem("sessionUser");
-              await API.auth();
-              return API.req(path, { ...opts, __reauthTried: true });
-            } catch (reauthErr) {
-              API.authDebug("req:reauth-failed", String(reauthErr?.message || reauthErr));
-            }
-          }
           // bubble for caller to reauth UI if needed
+          const txt = await res.text().catch(()=> "");
           throw new Error(`${res.status}: ${txt || "Unauthorized"}`);
         }
         if (!res.ok) {
@@ -5910,17 +5851,6 @@
       indicator.classList.remove("hidden");
     }
     function resetExpenseForm(){
-      setExpenseToday();
-      const expCategory = $("#expCategory");
-      if (expCategory) {
-        expCategory.value = "";
-        syncDropdown("expCategory");
-      }
-      const expAccount = $("#expAccount");
-      if (expAccount) {
-        expAccount.value = "main";
-        syncDropdown("expAccount");
-      }
       $("#expTitle").value = "";
       $("#expUnit").value = "";
       $("#expQty").value = "1";
@@ -7219,11 +7149,15 @@
       const q = new URLSearchParams();
       if (account) q.set("account", account);
       const data = await API.get(`/api/cashflow/withdraw-act?${q.toString()}`);
+      const body = $("#cashflowActBody");
       const list = $("#cashflowActList");
       const empty = $("#cashflowActEmpty");
-      if (!list) return;
+      if (!body && !list) return;
       if (!empty) return;
       const items = data.items || [];
+      if (body) {
+        body.innerHTML = "";
+      }
       if (list) {
         list.innerHTML = "";
       }
@@ -7237,6 +7171,9 @@
         return span;
       };
       if (!items.length){
+        if (body) {
+          body.innerHTML = `<tr><td colspan="6" class="muted2">Нет данных.</td></tr>`;
+        }
         return;
       }
       for (const r of items){
@@ -7250,8 +7187,11 @@
         const amountText = `${Number(r.amount || 0).toFixed(2)}`;
         const signatureCard = document.createElement("div");
         signatureCard.className = "actSignature";
+        const sigCell = document.createElement("td");
+        sigCell.className = "sigCell";
         const appendBadge = (badge)=>{
-          signatureCard.appendChild(badge);
+          signatureCard.appendChild(badge.cloneNode(true));
+          sigCell.appendChild(badge);
         };
 
         if (sigIsRefuse){
@@ -7262,12 +7202,15 @@
           img.alt = "Подпись";
           img.loading = "lazy";
           signatureCard.appendChild(img);
+          const cellImg = img.cloneNode();
+          sigCell.appendChild(cellImg);
           appendBadge(makeBadge("Подписано", "ok"));
           try{
             const blob = await API.getBlob(`/api/cashflow/requests/${r.request_id}/participants/${r.participant_telegram_id}/signature.png`);
             const url = URL.createObjectURL(blob);
             CashflowState.signatureUrls.push(url);
             img.src = url;
+            cellImg.src = url;
           }catch{
             appendBadge(makeBadge("Подпись не найдена", "warn"));
           }
@@ -7278,6 +7221,18 @@
           appendBadge(makeBadge("Ожидает подписи", "warn"));
         }
 
+        if (body) {
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td>${escapeHtml(date)}</td>
+            <td>${escapeHtml(op)}</td>
+            <td>${amountText}</td>
+            <td>${escapeHtml(fio)}</td>
+            <td>${escapeHtml(userType)}</td>
+          `;
+          tr.appendChild(sigCell);
+          body.appendChild(tr);
+        }
 
         if (list) {
           const card = document.createElement("div");
@@ -7791,7 +7746,10 @@
 
       setToast("Сохранено");
       await refreshAll();
-      resetExpenseForm();
+
+      if (andMore){
+        resetExpenseForm();
+      }
     }
 
     /**********************
@@ -7839,8 +7797,6 @@
       }
       ySel.value = String(State.year);
       mSel.value = String(State.month);
-      syncDropdown("yearSelect");
-      syncDropdown("monthSelect");
 
       $("#monthModal").classList.add("show");
     }
@@ -8470,8 +8426,6 @@
       initDropdownFromSelect("expTemplate", "expTemplateDropdown");
       initDropdownFromSelect("histMonthSelect", "histMonthDropdown");
       initDropdownFromSelect("histCategorySelect", "histCategoryDropdown");
-      initDropdownFromSelect("yearSelect", "yearSelectDropdown");
-      initDropdownFromSelect("monthSelect", "monthSelectDropdown");
       initDropdownFromSelect("periodYearSelect", "periodYearDropdown");
       initDropdownFromSelect("periodMonthSelect", "periodMonthDropdown");
       initDropdownFromSelect("cashflowCreateAccount", "cashflowCreateAccountDropdown");
