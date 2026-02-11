@@ -3515,17 +3515,9 @@
           try { API.user = JSON.parse(localStorage.getItem("sessionUser")||"null"); } catch { API.user=null; }
         }
         const initData = API.getTelegramInitData();
-        const isTelegramContext = !!tg;
-        if (isTelegramContext){
-          if (!initData){
-            API.token = null;
-            API.user = null;
-            localStorage.removeItem("sessionToken");
-            localStorage.removeItem("sessionUser");
-            throw new Error("Нет initData от Telegram. Закройте и откройте приложение из Telegram заново.");
-          }
-          // В Telegram всегда перевыпускаем сессию из initData,
-          // чтобы токен из localStorage от другого аккаунта не подменял пользователя.
+        if (initData){
+          // При каждом запуске внутри Telegram перевыпускаем сессию из initData,
+          // чтобы локальный токен от другого аккаунта не подменял текущего пользователя.
           return API.auth();
         }
         if (!API.token) return API.auth();
