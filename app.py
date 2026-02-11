@@ -1261,8 +1261,18 @@ def list_report_recipients(settings_row: Optional[sqlite3.Row] = None) -> List[i
     chat_id = s["report_chat_id"]
     if chat_id:
         ids.add(int(chat_id))
+
     allow = refresh_allowlist_if_needed()
-    allowed_ids = {tid for tid, u in allow.items() if u.get("active") is True}
+    admin_ids = {
+        tid
+        for tid, u in allow.items()
+        if u.get("active") is True and str(u.get("role", "")).strip() == "admin"
+    }
+    allowed_ids = {
+        tid
+        for tid, u in allow.items()
+        if u.get("active") is True and str(u.get("role", "")).strip() != "admin"
+    }
     if allowed_ids:
         placeholders = ",".join("?" for _ in allowed_ids)
         rows = db_fetchall(
@@ -1276,7 +1286,9 @@ def list_report_recipients(settings_row: Optional[sqlite3.Row] = None) -> List[i
         )
     else:
         rows = []
+
     ids.update(int(r["telegram_id"]) for r in rows)
+    ids.difference_update(admin_ids)
     return sorted(ids)
 # ---------------------------
 # Session token (HMAC signed JSON) - self-contained (no external JWT deps)
@@ -2648,13 +2660,7 @@ async def on_reports_menu(cq: CallbackQuery):
         m = get_or_create_month(today.year, today.month)
         summary = compute_month_summary(int(m["id"]), ensure_tithe=True)
         text = format_month_summary_text(summary)
-        webapp_url = require_https_webapp_url(CFG.WEBAPP_URL)
-        inline_keyboard = []
-        if webapp_url:
-            inline_keyboard.append([InlineKeyboardButton(text="Открыть дашборд", web_app=WebAppInfo(url=webapp_url))])
-        await cq.message.answer(text, reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=inline_keyboard
-        ))
+        await cq.message.answer(text)
         await cq.answer()
         return
 
@@ -2831,7 +2837,7 @@ def fmt_percent_1(x: float) -> str:
     return f"{x * 100:.1f}%"
 
 
-def build_sunday_report_text(today: dt.date) -> Tuple[str, InlineKeyboardMarkup]:
+def build_sunday_report_text(today: dt.date) -> Tuple[str, Optional[InlineKeyboardMarkup]]:
     tz = CFG.tzinfo()
     s_date = last_sunday(today)
     m = get_or_create_month(s_date.year, s_date.month)
@@ -2879,18 +2885,10 @@ def build_sunday_report_text(today: dt.date) -> Tuple[str, InlineKeyboardMarkup]
         f"• СДДР: <b>{sddr_text}</b>"
     )
 
-    webapp_url = require_https_webapp_url(CFG.WEBAPP_URL)
-    inline_keyboard = []
-    if webapp_url:
-        inline_keyboard.append([InlineKeyboardButton(text="Открыть дашборд", web_app=WebAppInfo(url=webapp_url))])
-    inline_keyboard.append([InlineKeyboardButton(text="Добавить расход", callback_data="quick:expense")])
-    if webapp_url:
-        inline_keyboard.append([InlineKeyboardButton(text="История месяца", web_app=WebAppInfo(url=webapp_url))])
-    kb = InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
-    return title + block1 + block2 + block3, kb
+    return title + block1 + block2 + block3, None
 
 
-def build_month_expenses_report_text(today: dt.date) -> Tuple[str, InlineKeyboardMarkup]:
+def build_month_expenses_report_text(today: dt.date) -> Tuple[str, Optional[InlineKeyboardMarkup]]:
     m = get_or_create_month(today.year, today.month)
     month_id = int(m["id"])
 
@@ -2939,13 +2937,7 @@ def build_month_expenses_report_text(today: dt.date) -> Tuple[str, InlineKeyboar
         f"• Факт. баланс: <b>{fmt_money(float(summary['fact_balance']))}</b>"
     )
 
-    webapp_url = require_https_webapp_url(CFG.WEBAPP_URL)
-    inline_keyboard = []
-    if webapp_url:
-        inline_keyboard.append([InlineKeyboardButton(text="Открыть дашборд", web_app=WebAppInfo(url=webapp_url))])
-    inline_keyboard.append([InlineKeyboardButton(text="Добавить расход", callback_data="quick:expense")])
-    kb = InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
-    return title + body, kb
+    return title + body, None
 
 
 def format_month_summary_text(summary: Dict[str, Any]) -> str:
@@ -3100,18 +3092,6 @@ async def run_sunday_report_job() -> None:
         tzinfo = ZoneInfo(str(s["timezone"] or CFG.TZ))
         today = dt.datetime.now(tzinfo).date()
         await send_sunday_reports_bundle(today, recipients, raise_on_error=False)
-
-        month_row = get_or_create_month(today.year, today.month)
-        png_data, filename, month_meta = build_month_report_png(int(month_row["id"]), preset="landscape", pixel_ratio=2, dpi=192)
-        caption = f"PNG-отчёт за {RU_MONTHS[int(month_meta['month']) - 1]} {int(month_meta['year'])}"
-        await send_report_png_to_recipients(
-            png_data,
-            filename,
-            caption,
-            recipients,
-            raise_on_error=False,
-            kind="report_png",
-        )
 
     await run_job_with_logging("sunday_report", _job())
 
