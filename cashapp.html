@@ -558,10 +558,6 @@
         <button id="themeBtn" class="iconBtn" type="button" title="Тема">
           <span class="material-symbols-rounded" id="themeIcon">dark_mode</span>
         </button>
-        <button id="refreshBtn" class="iconBtn" type="button" title="Обновить">
-          <span class="material-symbols-rounded">refresh</span>
-        </button>
-
       </div>
     </div>
 
@@ -1459,6 +1455,55 @@
 
     }
 
+    function wirePullToRefresh(){
+      const minPullDistance = 90;
+      const maxHorizontalDrift = 64;
+      let touchStartY = 0;
+      let touchStartX = 0;
+      let isTracking = false;
+      let isRefreshing = false;
+
+      const onRefresh = ()=>{
+        if (isRefreshing) return;
+        isRefreshing = true;
+        ensureAuth()
+          .then((ok)=> ok ? loadList() : Promise.resolve())
+          .then(()=> toast("Обновлено"))
+          .catch((e)=> toast(String(e.message || e)))
+          .finally(()=>{ isRefreshing = false; });
+      };
+
+      window.addEventListener("touchstart", (e)=>{
+        if (e.touches.length !== 1 || window.scrollY > 0) {
+          isTracking = false;
+          return;
+        }
+        const touch = e.touches[0];
+        touchStartY = touch.clientY;
+        touchStartX = touch.clientX;
+        isTracking = true;
+      }, { passive: true });
+
+      window.addEventListener("touchmove", (e)=>{
+        if (!isTracking || e.touches.length !== 1) return;
+        const touch = e.touches[0];
+        const deltaY = touch.clientY - touchStartY;
+        const deltaX = Math.abs(touch.clientX - touchStartX);
+        if (deltaY <= 0 || deltaX > maxHorizontalDrift) {
+          isTracking = false;
+          return;
+        }
+        if (deltaY >= minPullDistance) {
+          isTracking = false;
+          onRefresh();
+        }
+      }, { passive: true });
+
+      window.addEventListener("touchend", ()=>{
+        isTracking = false;
+      }, { passive: true });
+    }
+
 
     // bind
     $("tabRequests").addEventListener("click", ()=> setTab("requests"));
@@ -1471,15 +1516,6 @@
     $("sigSend").addEventListener("click", ()=> signCurrent().catch(e=> toast(String(e.message||e))));
     $("refuseBtn").addEventListener("click", ()=> refuseCurrent().catch(e=> toast(String(e.message||e))));
 
-    $("refreshBtn").addEventListener("click", ()=>{
-      ensureAuth()
-        .then((ok)=> ok ? loadList() : Promise.resolve())
-        .then(()=> toast("Обновлено"))
-        .catch(e=> toast(String(e.message||e)));
-    });
-
-
-
     $("themeBtn").addEventListener("click", ()=>{
       const curTheme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
       applyTheme(curTheme === "dark" ? "light" : "dark");
@@ -1491,6 +1527,7 @@
     (async function init(){
       initTheme();
       Pad.init();
+      wirePullToRefresh();
       loadStoredToken();
 
       State.dropdowns.account = makeDropdown("accountSel", "accountLabel");
