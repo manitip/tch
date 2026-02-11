@@ -3461,9 +3461,42 @@
       token: null,
       user: null,
       baseUrl: location.origin, // same host
+      readInitDataFromLocation(){
+        const fromQuery = new URLSearchParams(location.search).get("tgWebAppData");
+        if (fromQuery) return fromQuery;
+        const hash = (location.hash || "").replace(/^#/, "");
+        if (!hash) return "";
+        return new URLSearchParams(hash).get("tgWebAppData") || "";
+      },
+      getTelegramInitData(){
+        const initData = tg?.initData || API.readInitDataFromLocation() || sessionStorage.getItem("tgInitData") || "";
+        if (initData) sessionStorage.setItem("tgInitData", initData);
+        return initData;
+      },
       async auth(){
-        const initData = tg?.initData || "";
-        if (!initData) throw new Error("Нет initData. Откройте через Telegram.");
+        const initData = API.getTelegramInitData();
+        if (!initData) {
+          const unsafeUserId = Number(tg?.initDataUnsafe?.user?.id || 0);
+          if (unsafeUserId > 0) {
+            const unsafeRes = await fetch(`${API.baseUrl}/api/auth/telegram/unsafe`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "X-Telegram-WebApp": "1"
+              },
+              body: JSON.stringify({ telegram_id: unsafeUserId })
+            });
+            if (unsafeRes.ok) {
+              const unsafeData = await unsafeRes.json();
+              API.token = unsafeData.token;
+              API.user = unsafeData.user;
+              localStorage.setItem("sessionToken", API.token);
+              localStorage.setItem("sessionUser", JSON.stringify(API.user));
+              return unsafeData;
+            }
+          }
+          throw new Error("Нет initData. Откройте через Telegram.");
+        }
         const res = await fetch(`${API.baseUrl}/api/auth/telegram`,{
           method:"POST",
           headers: {"Content-Type":"application/json"},
