@@ -3502,18 +3502,22 @@
           if (unsafeData) return unsafeData;
           throw new Error("Нет initData. Откройте через Telegram.");
         }
-      async auth(){
-        const initData = API.getTelegramInitData();
-        if (!initData) throw new Error("Нет initData. Откройте через Telegram.");
-        const res = await fetch(`${API.baseUrl}/api/auth/telegram`,{
-          method:"POST",
-          headers: {"Content-Type":"application/json"},
-          body: JSON.stringify({initData})
+
+        const res = await fetch(`${API.baseUrl}/api/auth/telegram`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({ initData })
         });
+
         if (!res.ok) {
-          const t = await res.text().catch(()=> "");
+          if (res.status === 400 || res.status === 401) {
+            const unsafeData = await API.authWithUnsafeFallback();
+            if (unsafeData) return unsafeData;
+          }
+          const t = await res.text().catch(() => "");
           throw new Error(`Auth failed: ${res.status} ${t}`);
         }
+
         const data = await res.json();
         API.applyAuthData(data);
         return data;
