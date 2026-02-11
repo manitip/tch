@@ -3625,7 +3625,35 @@
       backupBusy: false,
       settingsPage: null,
       settingsScroll: { menu: 0, page: 0 },
+      settingsData: null,
+      settingsLoadPromise: null,
+      settingsLoadedAt: 0,
     };
+
+    const SETTINGS_CACHE_TTL_MS = 60_000;
+    const prefersReducedMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    function settingsScrollBehavior(){
+      return prefersReducedMotion ? "auto" : "smooth";
+    }
+
+    async function ensureSettingsData({force=false}={}){
+      const canUseCache = !force && State.settingsData && (Date.now() - State.settingsLoadedAt < SETTINGS_CACHE_TTL_MS);
+      if (canUseCache) return State.settingsData;
+      if (!force && State.settingsLoadPromise) return State.settingsLoadPromise;
+
+      State.settingsLoadPromise = API.get("/api/settings")
+        .then((data)=>{
+          State.settingsData = data;
+          State.settingsLoadedAt = Date.now();
+          return data;
+        })
+        .finally(()=>{
+          State.settingsLoadPromise = null;
+        });
+
+      return State.settingsLoadPromise;
+    }
 
     /**********************
      * Attachments
@@ -7425,19 +7453,11 @@
       }
       panel.classList.remove("hidden");
       panel.setAttribute("aria-hidden", "false");
-      body.scrollTop = State.settingsScroll.page || 0;
+      body.scrollTop = 0;
       requestAnimationFrame(()=> panel.classList.add("open"));
-      window.scrollTo({top: 0, left: 0, behavior: "auto"});
+      window.scrollTo({top: 0, left: 0, behavior: settingsScrollBehavior()});
       resetPanelScroll();
-      if (active) active.scrollIntoView({block: "start", inline: "nearest"});
-      requestAnimationFrame(()=> {
-        panel.classList.add("open");
-        resetPanelScroll();
-      });
-      setTimeout(()=>{
-        window.scrollTo({top: 0, left: 0, behavior: "auto"});
-        resetPanelScroll();
-      }, 120);
+      if (active) active.scrollIntoView({block: "start", inline: "nearest", behavior: settingsScrollBehavior()});
       if (sectionId === "cashflowSection"){
         setCashflowTab("requests");
         loadCashflowRequests().catch(()=> {});
@@ -7463,7 +7483,7 @@
           sec.classList.remove("activePage");
         });
         State.settingsPage = null;
-        window.scrollTo({top: State.settingsScroll.menu || 0});
+        window.scrollTo({top: State.settingsScroll.menu || 0, left: 0, behavior: settingsScrollBehavior()});
       };
       if (immediate){
         panel.classList.remove("open");
@@ -7513,7 +7533,7 @@
 
       // Load server settings for admin/viewer
       if (isAdmin || isViewer){
-        const s = await API.get("/api/settings");
+        const s = await ensureSettingsData();
         if (isAdmin) {
           $("#setChatId").value = (s.report_chat_id ?? "");
           $("#setSundayTime").value = (s.sunday_report_time || "18:00");
@@ -7565,7 +7585,7 @@
     }
 
     async function loadThemeSetting(){
-      const s = await API.get("/api/settings");
+      const s = await ensureSettingsData();
       applyTheme(s.ui_theme || "auto");
       const themeSelect = $("#setTheme");
       if (themeSelect) themeSelect.value = (s.ui_theme || "auto");
@@ -8449,9 +8469,6 @@
       // build month selection lists for modal
       await refreshAll({ deferAnalytics: true, deferLookups: true });
       await themePromise;
-
-      // initial render settings UI (lazy)
-      runIdle(()=> renderSettingsUI());
 
       const initialScreen = new URLSearchParams(window.location.search).get("screen");
       if (["dashboard","add","history","settings"].includes(initialScreen)){
