@@ -1988,9 +1988,6 @@
         </button>
       </div>
       <div class="row" style="gap:10px;">
-        <button id="refreshBtn" class="btnIcon" type="button" aria-label="Обновить">
-          <span class="icon">refresh</span>
-        </button>
         <span id="roleBadge" class="badge">роль: —</span>
       </div>
     </div>
@@ -7914,6 +7911,62 @@
       });
     }
 
+    function wirePullToRefresh(){
+      const minPullDistance = 90;
+      const maxHorizontalDrift = 64;
+      let touchStartY = 0;
+      let touchStartX = 0;
+      let isTracking = false;
+      let isRefreshing = false;
+
+      const onRefresh = async ()=>{
+        if (isRefreshing) return;
+        isRefreshing = true;
+        try{
+          await refreshAll();
+          setToast("Обновлено");
+        }catch(e){
+          alert(String(e.message || e));
+        }finally{
+          isRefreshing = false;
+        }
+      };
+
+      window.addEventListener("touchstart", (e)=>{
+        if (e.touches.length !== 1 || window.scrollY > 0) {
+          isTracking = false;
+          return;
+        }
+        const touch = e.touches[0];
+        touchStartY = touch.clientY;
+        touchStartX = touch.clientX;
+        isTracking = true;
+      }, { passive: true });
+
+      window.addEventListener("touchmove", (e)=>{
+        if (!isTracking || e.touches.length !== 1) return;
+        const touch = e.touches[0];
+        const deltaY = touch.clientY - touchStartY;
+        const deltaX = Math.abs(touch.clientX - touchStartX);
+        if (deltaY <= 0) {
+          isTracking = false;
+          return;
+        }
+        if (deltaX > maxHorizontalDrift) {
+          isTracking = false;
+          return;
+        }
+        if (deltaY >= minPullDistance) {
+          isTracking = false;
+          onRefresh();
+        }
+      }, { passive: true });
+
+      window.addEventListener("touchend", ()=>{
+        isTracking = false;
+      }, { passive: true });
+    }
+
     async function applyPeriodSelection(){
       const yearSelect = $("#periodYearSelect");
       const monthSelect = $("#periodMonthSelect");
@@ -7971,12 +8024,6 @@
       });
 
       // topbar
-      $("#refreshBtn").addEventListener("click", async ()=>{
-        try{
-          await refreshAll();
-          setToast("Обновлено");
-        }catch(e){ alert(String(e.message||e)); }
-      });
       $("#monthBtn").addEventListener("click", openMonthModal);
 
       // month modal
@@ -8450,6 +8497,7 @@
       State.otherIncomeDate = `${t.y}-${String(t.m).padStart(2,"0")}-${String(t.d).padStart(2,"0")}`;
 
       wireEvents();
+      wirePullToRefresh();
       initDropdownFromSelect("donIncomeType", "donIncomeTypeDropdown");
       initDropdownFromSelect("donAccount", "donAccountDropdown");
       initDropdownFromSelect("expAccount", "expAccountDropdown");
