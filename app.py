@@ -4899,7 +4899,7 @@ async def api_report_month_expenses(u: sqlite3.Row = Depends(require_role("admin
     tzinfo = ZoneInfo(str(s["timezone"] or CFG.TZ))
     today = dt.datetime.now(tzinfo).date()
     text, kb = build_month_expenses_report_text(today)
-    await send_report_to_recipients(text, kb, recipients, raise_on_error=True, kind="report")
+    await send_report_to_recipients(text, kb, recipients, raise_on_error=False, kind="report")
     return {"ok": True}
 
 @APP.post("/api/reports/test")
@@ -4916,7 +4916,7 @@ async def api_report_test(u: sqlite3.Row = Depends(require_role("admin", "accoun
         f"Если вы это видите, доставка работает.\n"
         f"Время: {now:%Y-%m-%d %H:%M:%S %Z}"
     )
-    await send_report_to_recipients(text, None, recipients, raise_on_error=True, kind="report")
+    await send_report_to_recipients(text, None, recipients, raise_on_error=False, kind="report")
     return {"ok": True}
 
 # ---------------------------
