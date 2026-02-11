@@ -7420,7 +7420,7 @@
       }
       panel.classList.remove("hidden");
       panel.setAttribute("aria-hidden", "false");
-      body.scrollTop = State.settingsScroll.page || 0;
+      body.scrollTop = 0;
       requestAnimationFrame(()=> panel.classList.add("open"));
       if (sectionId === "cashflowSection"){
         setCashflowTab("requests");
