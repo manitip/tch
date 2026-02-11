@@ -2426,7 +2426,6 @@ async def send_report_to_recipients(
                 await bot_send_or_http_error(chat_id, text, safe_markup)
                 log_message_delivery(kind, chat_id, "success", None)
             else:
-                await bot_send_safe(chat_id, text, safe_markup)
                 ok, err = await bot_send_safe(chat_id, text, safe_markup)
                 if ok:
                     log_message_delivery(kind, chat_id, "success", None)
@@ -3070,6 +3069,28 @@ async def run_job_with_logging(job_id: str, coro: Awaitable[None]) -> None:
             pass
 
 
+
+
+async def send_sunday_reports_bundle(
+        today: dt.date,
+        recipients: List[int],
+        raise_on_error: bool,
+) -> None:
+    text, kb = build_sunday_report_text(today)
+    await send_report_to_recipients(text, kb, recipients, raise_on_error=raise_on_error, kind="report")
+
+    month_row = get_or_create_month(today.year, today.month)
+    png_data, filename, month_meta = build_month_report_png(int(month_row["id"]), preset="landscape", pixel_ratio=2, dpi=192)
+    caption = f"PNG-отчёт за {RU_MONTHS[int(month_meta['month']) - 1]} {int(month_meta['year'])}"
+    await send_report_png_to_recipients(
+        png_data,
+        filename,
+        caption,
+        recipients,
+        raise_on_error=raise_on_error,
+        kind="report_png",
+    )
+
 async def run_sunday_report_job() -> None:
     async def _job() -> None:
         s = get_settings()
@@ -3078,8 +3099,7 @@ async def run_sunday_report_job() -> None:
             return
         tzinfo = ZoneInfo(str(s["timezone"] or CFG.TZ))
         today = dt.datetime.now(tzinfo).date()
-        text, kb = build_sunday_report_text(today)
-        await send_report_to_recipients(text, kb, recipients, raise_on_error=False, kind="report")
+        await send_sunday_reports_bundle(today, recipients, raise_on_error=False)
 
         month_row = get_or_create_month(today.year, today.month)
         png_data, filename, month_meta = build_month_report_png(int(month_row["id"]), preset="landscape", pixel_ratio=2, dpi=192)
@@ -4864,8 +4884,7 @@ async def api_report_sunday(u: sqlite3.Row = Depends(require_role("admin", "acco
 
     tzinfo = ZoneInfo(str(s["timezone"] or CFG.TZ))
     today = dt.datetime.now(tzinfo).date()
-    text, kb = build_sunday_report_text(today)
-    await send_report_to_recipients(text, kb, recipients, raise_on_error=True, kind="report")
+    await send_sunday_reports_bundle(today, recipients, raise_on_error=True)
     return {"ok": True}
 
 
