@@ -7407,7 +7407,12 @@
       const panel = $("#settingsPanel");
       const title = $("#settingsPanelTitle");
       const body = $("#settingsPanelBody");
+      const content = panel ? panel.querySelector(".settingsPanelContent") : null;
       if (!panel || !title || !body) return;
+      const resetPanelScroll = ()=>{
+        body.scrollTop = 0;
+        if (content) content.scrollTop = 0;
+      };
       title.textContent = config.title;
       $$("#settingsSectionsHost .section").forEach((sec)=>{
         sec.classList.add("hidden");
@@ -7420,8 +7425,12 @@
       }
       panel.classList.remove("hidden");
       panel.setAttribute("aria-hidden", "false");
-      body.scrollTop = State.settingsScroll.page || 0;
-      requestAnimationFrame(()=> panel.classList.add("open"));
+      resetPanelScroll();
+      requestAnimationFrame(()=> {
+        panel.classList.add("open");
+        resetPanelScroll();
+      });
+      setTimeout(resetPanelScroll, 120);
       if (sectionId === "cashflowSection"){
         setCashflowTab("requests");
         loadCashflowRequests().catch(()=> {});
