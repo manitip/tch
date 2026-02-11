@@ -57,6 +57,8 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     WebAppInfo,
+    MenuButtonDefault,
+    MenuButtonWebApp,
 )
 
 # Optional for Excel export
@@ -2226,24 +2228,35 @@ def get_user_role_from_db(telegram_id: int) -> str:
     return str(row["role"])
 
 
+def get_persistent_menu_url(role: str) -> Optional[str]:
+    if role == "cash_signer":
+        return cashapp_webapp_url()
+    if role in ("admin", "accountant", "viewer"):
+        return require_https_webapp_url(CFG.WEBAPP_URL)
+    return None
+
+
+async def configure_persistent_menu(chat_id: int, role: str) -> None:
+    if not bot:
+        return
+    url = get_persistent_menu_url(role)
+    try:
+        if url:
+            await bot.set_chat_menu_button(
+                chat_id=chat_id,
+                menu_button=MenuButtonWebApp(text="Бухгалтерия", web_app=WebAppInfo(url=url)),
+            )
+        else:
+            await bot.set_chat_menu_button(chat_id=chat_id, menu_button=MenuButtonDefault())
+    except Exception:
+        pass
+
+
 def main_menu_kb(role: str) -> InlineKeyboardMarkup:
     if role == "cash_signer":
-        cashapp_url = cashapp_webapp_url()
-        if not cashapp_url:
-            return InlineKeyboardMarkup(inline_keyboard=[])
-        return InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="Наличные / Подписи", web_app=WebAppInfo(url=cashapp_url))],
-            ]
-        )
+        return InlineKeyboardMarkup(inline_keyboard=[])
 
-    webapp_url = require_https_webapp_url(CFG.WEBAPP_URL)
     buttons = [
-        *(
-            [[InlineKeyboardButton(text="Открыть бухгалтерию (WebApp)", web_app=WebAppInfo(url=webapp_url))]]
-            if webapp_url
-            else []
-        ),
         [
             InlineKeyboardButton(text="Быстрый ввод пожертвования", callback_data="quick:donation"),
             InlineKeyboardButton(text="Быстрый ввод расхода", callback_data="quick:expense"),
@@ -2437,6 +2450,7 @@ async def on_start(m: Message):
         register_bot_subscriber(tid)
 
     role = get_user_role_from_db(tid)
+    await configure_persistent_menu(m.chat.id, role)
     await m.answer(
         "Меню бухгалтерии:",
         reply_markup=main_menu_kb(role),

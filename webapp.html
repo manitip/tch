@@ -1504,6 +1504,16 @@
       overscroll-behavior: contain;
       -webkit-overflow-scrolling: touch;
     }
+    #histMonthDropdown.open,
+    #histCategoryDropdown.open{
+      z-index: 1200;
+    }
+    #histMonthDropdown .dropdownPanel,
+    #histCategoryDropdown .dropdownPanel,
+    #yearDropdown .dropdownPanel,
+    #monthDropdown .dropdownPanel{
+      z-index: 1300;
+    }
     .dropdown.open-up.open .dropdownPanel{
       transform: translateY(0) scale(1);
     }
@@ -1565,36 +1575,6 @@
       color: rgba(16,185,129,.95);
     }
 
-    .cashflowActTable{
-      width: 100%;
-      border-collapse: collapse;
-      table-layout: fixed;
-      min-width: 520px;
-      font-size: 13px;
-    }
-    .cashflowActTable th,
-    .cashflowActTable td{
-      padding: 10px 8px;
-      border-bottom: 1px solid var(--stroke);
-      text-align: left;
-      vertical-align: top;
-    }
-    .cashflowActTable th{
-      color: var(--muted);
-      font-weight: 700;
-      white-space: nowrap;
-    }
-    .cashflowActTable td:nth-child(3),
-    .cashflowActTable td:nth-child(4),
-    .cashflowActTable td:nth-child(5),
-    .cashflowActTable td:nth-child(6){
-      white-space: normal;
-      word-break: break-word;
-    }
-    .cashflowActTable th:nth-child(2),
-    .cashflowActTable td:nth-child(2){
-      text-align: right;
-    }
     .sigCell{
       display:flex;
       flex-direction:column;
@@ -3018,23 +2998,6 @@
                         </button>
                       </div>
                       <div class="spacer12"></div>
-                      <div style="overflow:auto;">
-                        <table class="cashflowActTable">
-                          <thead>
-                            <tr>
-                              <th>Дата</th>
-                              <th>Операция</th>
-                              <th>Сумма</th>
-                              <th>ФИО</th>
-                              <th>Тип пользователя</th>
-                              <th>Подпись</th>
-                            </tr>
-                          </thead>
-                          <tbody id="cashflowActBody">
-                            <tr><td colspan="6" class="muted2">Нет данных.</td></tr>
-                          </tbody>
-                        </table>
-                      </div>
                       <div id="cashflowActList" class="cashflowActList"></div>
                       <div id="cashflowActEmpty" class="tiny muted2">Нет данных.</div>
                     </div>
@@ -3196,11 +3159,25 @@
           <div class="grid2">
             <div class="field">
               <label>Год</label>
-              <select id="yearSelect" class="input"></select>
+              <div id="yearDropdown" class="dropdown">
+                <button type="button" class="dropdownTrigger" aria-haspopup="listbox" aria-expanded="false">
+                  <span class="dropdownValue">—</span>
+                  <span class="icon">expand_more</span>
+                </button>
+                <div class="dropdownPanel" role="listbox"></div>
+              </div>
+              <select id="yearSelect" class="input hiddenSelect" tabindex="-1" aria-hidden="true"></select>
             </div>
             <div class="field">
               <label>Месяц</label>
-              <select id="monthSelect" class="input"></select>
+              <div id="monthDropdown" class="dropdown">
+                <button type="button" class="dropdownTrigger" aria-haspopup="listbox" aria-expanded="false">
+                  <span class="dropdownValue">—</span>
+                  <span class="icon">expand_more</span>
+                </button>
+                <div class="dropdownPanel" role="listbox"></div>
+              </div>
+              <select id="monthSelect" class="input hiddenSelect" tabindex="-1" aria-hidden="true"></select>
             </div>
           </div>
           <button id="applyMonthBtn" class="btn primary" type="button">
@@ -7149,18 +7126,11 @@
       const q = new URLSearchParams();
       if (account) q.set("account", account);
       const data = await API.get(`/api/cashflow/withdraw-act?${q.toString()}`);
-      const body = $("#cashflowActBody");
       const list = $("#cashflowActList");
       const empty = $("#cashflowActEmpty");
-      if (!body && !list) return;
-      if (!empty) return;
+      if (!list || !empty) return;
       const items = data.items || [];
-      if (body) {
-        body.innerHTML = "";
-      }
-      if (list) {
-        list.innerHTML = "";
-      }
+      list.innerHTML = "";
       CashflowState.signatureUrls?.forEach((url)=> URL.revokeObjectURL(url));
       CashflowState.signatureUrls = [];
       empty.classList.toggle("hidden", items.length > 0);
@@ -7171,9 +7141,6 @@
         return span;
       };
       if (!items.length){
-        if (body) {
-          body.innerHTML = `<tr><td colspan="6" class="muted2">Нет данных.</td></tr>`;
-        }
         return;
       }
       for (const r of items){
@@ -7187,11 +7154,8 @@
         const amountText = `${Number(r.amount || 0).toFixed(2)}`;
         const signatureCard = document.createElement("div");
         signatureCard.className = "actSignature";
-        const sigCell = document.createElement("td");
-        sigCell.className = "sigCell";
         const appendBadge = (badge)=>{
-          signatureCard.appendChild(badge.cloneNode(true));
-          sigCell.appendChild(badge);
+          signatureCard.appendChild(badge);
         };
 
         if (sigIsRefuse){
@@ -7202,15 +7166,12 @@
           img.alt = "Подпись";
           img.loading = "lazy";
           signatureCard.appendChild(img);
-          const cellImg = img.cloneNode();
-          sigCell.appendChild(cellImg);
           appendBadge(makeBadge("Подписано", "ok"));
           try{
             const blob = await API.getBlob(`/api/cashflow/requests/${r.request_id}/participants/${r.participant_telegram_id}/signature.png`);
             const url = URL.createObjectURL(blob);
             CashflowState.signatureUrls.push(url);
             img.src = url;
-            cellImg.src = url;
           }catch{
             appendBadge(makeBadge("Подпись не найдена", "warn"));
           }
@@ -7219,19 +7180,6 @@
           appendBadge(makeBadge(text, sigValue === "SIGNED" ? "ok" : "warn"));
         } else {
           appendBadge(makeBadge("Ожидает подписи", "warn"));
-        }
-
-        if (body) {
-          const tr = document.createElement("tr");
-          tr.innerHTML = `
-            <td>${escapeHtml(date)}</td>
-            <td>${escapeHtml(op)}</td>
-            <td>${amountText}</td>
-            <td>${escapeHtml(fio)}</td>
-            <td>${escapeHtml(userType)}</td>
-          `;
-          tr.appendChild(sigCell);
-          body.appendChild(tr);
         }
 
         if (list) {
@@ -7745,11 +7693,8 @@
       }
 
       setToast("Сохранено");
+      resetExpenseForm();
       await refreshAll();
-
-      if (andMore){
-        resetExpenseForm();
-      }
     }
 
     /**********************
@@ -7797,6 +7742,8 @@
       }
       ySel.value = String(State.year);
       mSel.value = String(State.month);
+      syncDropdown("yearSelect");
+      syncDropdown("monthSelect");
 
       $("#monthModal").classList.add("show");
     }
@@ -8428,6 +8375,8 @@
       initDropdownFromSelect("histCategorySelect", "histCategoryDropdown");
       initDropdownFromSelect("periodYearSelect", "periodYearDropdown");
       initDropdownFromSelect("periodMonthSelect", "periodMonthDropdown");
+      initDropdownFromSelect("yearSelect", "yearDropdown");
+      initDropdownFromSelect("monthSelect", "monthDropdown");
       initDropdownFromSelect("cashflowCreateAccount", "cashflowCreateAccountDropdown");
       initDropdownFromSelect("cashflowFilterAccount", "cashflowFilterAccountDropdown");
       initDropdownFromSelect("cashflowFilterStatus", "cashflowFilterStatusDropdown");
