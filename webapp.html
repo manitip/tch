@@ -3461,15 +3461,46 @@
       token: null,
       user: null,
       baseUrl: location.origin, // same host
+      authDebugEnabled: (() => {
+        const flag = String(localStorage.getItem("authDebug") || new URLSearchParams(location.search).get("authDebug") || "").toLowerCase();
+        if (["1", "true", "yes", "on"].includes(flag)) return true;
+        const host = String(location.hostname || "").toLowerCase();
+        return host === "localhost" || host === "127.0.0.1";
+      })(),
+      authDebug(...args){
+        if (!API.authDebugEnabled) return;
+        console.log("[auth-debug]", ...args);
+      },
+      extractRawParam(raw, key){
+        const value = String(raw || "").replace(/^\?/, "").replace(/^#/, "");
+        if (!value) return "";
+        const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const match = value.match(new RegExp(`(?:^|&)${escapedKey}=([^&]*)`));
+        if (!match) return "";
+        const decoded = match[1].replace(/%(?![0-9A-Fa-f]{2})/g, "%25");
+        try {
+          return decodeURIComponent(decoded);
+        } catch {
+          return decoded;
+        }
+      },
       readInitDataFromLocation(){
-        const fromQuery = new URLSearchParams(location.search).get("tgWebAppData");
+        const fromQuery = API.extractRawParam(location.search, "tgWebAppData");
         if (fromQuery) return fromQuery;
-        const hash = (location.hash || "").replace(/^#/, "");
-        if (!hash) return "";
-        return new URLSearchParams(hash).get("tgWebAppData") || "";
+        return API.extractRawParam(location.hash, "tgWebAppData") || "";
       },
       getTelegramInitData(){
-        const initData = tg?.initData || API.readInitDataFromLocation() || sessionStorage.getItem("tgInitData") || "";
+        const tgInitData = tg?.initData || "";
+        const urlInitData = API.readInitDataFromLocation() || "";
+        const cachedInitData = sessionStorage.getItem("tgInitData") || "";
+        const initData = tgInitData || urlInitData || cachedInitData || "";
+        API.authDebug("getTelegramInitData", {
+          hasTgObject: !!tg,
+          tgInitDataLen: tgInitData.length,
+          urlInitDataLen: urlInitData.length,
+          cachedInitDataLen: cachedInitData.length,
+          selectedLen: initData.length
+        });
         if (initData) sessionStorage.setItem("tgInitData", initData);
         return initData;
       },
@@ -3481,14 +3512,23 @@
       },
       async authWithUnsafeFallback(){
         const unsafeUserId = Number(tg?.initDataUnsafe?.user?.id || 0);
+        API.authDebug("authWithUnsafeFallback:start", {
+          hasUnsafeUserId: !!unsafeUserId,
+          hasInitDataUnsafe: !!tg?.initDataUnsafe
+        });
         if (!unsafeUserId) return null;
         const unsafeRes = await fetch(`${API.baseUrl}/api/auth/telegram/unsafe`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "X-Telegram-WebApp": "1"
+            "X-Telegram-WebApp": "1",
+            "X-Telegram-Init-Data": tg?.initData || ""
           },
           body: JSON.stringify({ telegram_id: unsafeUserId })
+        });
+        API.authDebug("authWithUnsafeFallback:response", {
+          status: unsafeRes.status,
+          ok: unsafeRes.ok
         });
         if (!unsafeRes.ok) return null;
         const unsafeData = await unsafeRes.json();
@@ -3498,22 +3538,29 @@
       async auth(){
         const initData = API.getTelegramInitData();
         if (!initData) {
+          API.authDebug("auth:no-initData -> unsafe fallback");
           const unsafeData = await API.authWithUnsafeFallback();
           if (unsafeData) return unsafeData;
           throw new Error("Нет initData. Откройте через Telegram.");
         }
-      async auth(){
-        const initData = API.getTelegramInitData();
-        if (!initData) throw new Error("Нет initData. Откройте через Telegram.");
-        const res = await fetch(`${API.baseUrl}/api/auth/telegram`,{
-          method:"POST",
-          headers: {"Content-Type":"application/json"},
-          body: JSON.stringify({initData})
+
+        const res = await fetch(`${API.baseUrl}/api/auth/telegram`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({ initData })
         });
+        API.authDebug("auth:signed-response", { status: res.status, ok: res.ok });
+
         if (!res.ok) {
-          const t = await res.text().catch(()=> "");
+          if (res.status === 400 || res.status === 401) {
+            API.authDebug("auth:signed failed 400/401 -> unsafe fallback");
+            const unsafeData = await API.authWithUnsafeFallback();
+            if (unsafeData) return unsafeData;
+          }
+          const t = await res.text().catch(() => "");
           throw new Error(`Auth failed: ${res.status} ${t}`);
         }
+
         const data = await res.json();
         API.applyAuthData(data);
         return data;
@@ -3562,8 +3609,20 @@
         if (API.token) headers["Authorization"] = `Bearer ${API.token}`;
         const res = await fetch(`${API.baseUrl}${path}`, { ...opts, headers });
         if (res.status === 401 || res.status === 403) {
-          // bubble for caller to reauth UI if needed
           const txt = await res.text().catch(()=> "");
+          API.authDebug("req:unauthorized", { path, status: res.status, detail: txt || "Unauthorized" });
+          if (!opts.__reauthTried && !path.startsWith("/api/auth/telegram")) {
+            try {
+              API.token = null;
+              localStorage.removeItem("sessionToken");
+              localStorage.removeItem("sessionUser");
+              await API.auth();
+              return API.req(path, { ...opts, __reauthTried: true });
+            } catch (reauthErr) {
+              API.authDebug("req:reauth-failed", String(reauthErr?.message || reauthErr));
+            }
+          }
+          // bubble for caller to reauth UI if needed
           throw new Error(`${res.status}: ${txt || "Unauthorized"}`);
         }
         if (!res.ok) {
