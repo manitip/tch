@@ -54,6 +54,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import (
     Message,
     CallbackQuery,
+    BufferedInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     WebAppInfo,
@@ -2425,7 +2426,6 @@ async def send_report_to_recipients(
                 await bot_send_or_http_error(chat_id, text, safe_markup)
                 log_message_delivery(kind, chat_id, "success", None)
             else:
-                await bot_send_safe(chat_id, text, safe_markup)
                 ok, err = await bot_send_safe(chat_id, text, safe_markup)
                 if ok:
                     log_message_delivery(kind, chat_id, "success", None)
@@ -2434,6 +2434,38 @@ async def send_report_to_recipients(
         except HTTPException as exc:
             log_message_delivery(kind, chat_id, "fail", str(exc.detail))
             errors.append(f"{chat_id}: {exc.detail}")
+    if errors and raise_on_error:
+        raise HTTPException(status_code=502, detail="; ".join(errors))
+
+
+async def send_report_png_to_recipients(
+        png_bytes: bytes,
+        filename: str,
+        caption: str,
+        recipients: List[int],
+        raise_on_error: bool,
+        kind: str = "report_png",
+) -> None:
+    if not recipients:
+        if raise_on_error:
+            raise HTTPException(status_code=400, detail="No report recipients configured")
+        return
+    if not bot:
+        if raise_on_error:
+            raise HTTPException(status_code=503, detail="Bot is not initialized")
+        return
+
+    errors: List[str] = []
+    for chat_id in recipients:
+        try:
+            payload = BufferedInputFile(png_bytes, filename=filename)
+            await bot.send_document(chat_id=chat_id, document=payload, caption=caption)
+            log_message_delivery(kind, chat_id, "success", None)
+        except Exception as exc:
+            msg = format_telegram_exception(exc)
+            log_message_delivery(kind, chat_id, "fail", msg)
+            if raise_on_error:
+                errors.append(f"{chat_id}: {msg}")
     if errors and raise_on_error:
         raise HTTPException(status_code=502, detail="; ".join(errors))
 
@@ -3037,6 +3069,28 @@ async def run_job_with_logging(job_id: str, coro: Awaitable[None]) -> None:
             pass
 
 
+
+
+async def send_sunday_reports_bundle(
+        today: dt.date,
+        recipients: List[int],
+        raise_on_error: bool,
+) -> None:
+    text, kb = build_sunday_report_text(today)
+    await send_report_to_recipients(text, kb, recipients, raise_on_error=raise_on_error, kind="report")
+
+    month_row = get_or_create_month(today.year, today.month)
+    png_data, filename, month_meta = build_month_report_png(int(month_row["id"]), preset="landscape", pixel_ratio=2, dpi=192)
+    caption = f"PNG-отчёт за {RU_MONTHS[int(month_meta['month']) - 1]} {int(month_meta['year'])}"
+    await send_report_png_to_recipients(
+        png_data,
+        filename,
+        caption,
+        recipients,
+        raise_on_error=raise_on_error,
+        kind="report_png",
+    )
+
 async def run_sunday_report_job() -> None:
     async def _job() -> None:
         s = get_settings()
@@ -3045,8 +3099,7 @@ async def run_sunday_report_job() -> None:
             return
         tzinfo = ZoneInfo(str(s["timezone"] or CFG.TZ))
         today = dt.datetime.now(tzinfo).date()
-        text, kb = build_sunday_report_text(today)
-        await send_report_to_recipients(text, kb, recipients, raise_on_error=False, kind="report")
+        await send_sunday_reports_bundle(today, recipients, raise_on_error=False)
 
     await run_job_with_logging("sunday_report", _job())
 
@@ -4819,8 +4872,7 @@ async def api_report_sunday(u: sqlite3.Row = Depends(require_role("admin", "acco
 
     tzinfo = ZoneInfo(str(s["timezone"] or CFG.TZ))
     today = dt.datetime.now(tzinfo).date()
-    text, kb = build_sunday_report_text(today)
-    await send_report_to_recipients(text, kb, recipients, raise_on_error=True, kind="report")
+    await send_sunday_reports_bundle(today, recipients, raise_on_error=False)
     return {"ok": True}
 
 
@@ -4835,7 +4887,7 @@ async def api_report_month_expenses(u: sqlite3.Row = Depends(require_role("admin
     tzinfo = ZoneInfo(str(s["timezone"] or CFG.TZ))
     today = dt.datetime.now(tzinfo).date()
     text, kb = build_month_expenses_report_text(today)
-    await send_report_to_recipients(text, kb, recipients, raise_on_error=True, kind="report")
+    await send_report_to_recipients(text, kb, recipients, raise_on_error=False, kind="report")
     return {"ok": True}
 
 @APP.post("/api/reports/test")
@@ -4852,7 +4904,7 @@ async def api_report_test(u: sqlite3.Row = Depends(require_role("admin", "accoun
         f"Если вы это видите, доставка работает.\n"
         f"Время: {now:%Y-%m-%d %H:%M:%S %Z}"
     )
-    await send_report_to_recipients(text, None, recipients, raise_on_error=True, kind="report")
+    await send_report_to_recipients(text, None, recipients, raise_on_error=False, kind="report")
     return {"ok": True}
 
 # ---------------------------
@@ -5232,6 +5284,7 @@ def render_month_report_png(
     font_section = load_ttf_font(ImageFont, size=int(20 * scale), bold=True)
     font_body = load_ttf_font(ImageFont, size=int(16 * scale), bold=False)
     font_small = load_ttf_font(ImageFont, size=int(13 * scale), bold=False)
+    font_bar_value = load_ttf_font(ImageFont, size=int(15 * scale), bold=True)
 
     margin = int(44 * scale)
     gap = int(20 * scale)
@@ -5586,9 +5639,9 @@ def render_month_report_png(
             )
 
             value_label = fmt_money(item["total"])
-            val_w, val_h = text_bbox(draw, value_label, font_small)
+            val_w, val_h = text_bbox(draw, value_label, font_bar_value)
             val_y = max(chart_y0 + int(6 * scale), base_y - bar_h - val_h - int(4 * scale))
-            draw.text((bar_x + (bar_w - val_w) / 2, val_y), value_label, font=font_small, fill=color_text)
+            draw.text((bar_x + (bar_w - val_w) / 2, val_y), value_label, font=font_bar_value, fill=color_text)
 
             label = item["date"].strftime("%d.%m")
             lw, lh = text_bbox(draw, label, font_small)
@@ -5743,14 +5796,12 @@ def render_month_report_png(
 
 
 
-@APP.get("/api/export/png")
-def export_png(
-    month_id: int = Query(...),
-    preset: str = Query("landscape"),
-    pixel_ratio: int = Query(2, ge=1, le=4, description="Плотность пикселей (1..4). 2 = Retina"),
-    dpi: int = Query(192, ge=72, le=600, description="DPI метаданные (72..600). На экране важнее pixel_ratio"),
-    u: sqlite3.Row = Depends(require_role("admin", "accountant", "viewer")),
-):
+def build_month_report_png(
+    month_id: int,
+    preset: str = "landscape",
+    pixel_ratio: int = 2,
+    dpi: int = 192,
+) -> Tuple[bytes, str, sqlite3.Row]:
     if preset not in PNG_PRESETS:
         raise HTTPException(status_code=400, detail="Invalid preset")
 
@@ -5816,8 +5867,19 @@ def export_png(
         pixel_ratio=pixel_ratio,
         dpi=dpi,
     )
-
     filename = f"report_{m['year']}_{int(m['month']):02d}_{preset}@{int(pixel_ratio)}x.png"
+    return png_data, filename, m
+
+
+@APP.get("/api/export/png")
+def export_png(
+    month_id: int = Query(...),
+    preset: str = Query("landscape"),
+    pixel_ratio: int = Query(2, ge=1, le=4, description="Плотность пикселей (1..4). 2 = Retina"),
+    dpi: int = Query(192, ge=72, le=600, description="DPI метаданные (72..600). На экране важнее pixel_ratio"),
+    u: sqlite3.Row = Depends(require_role("admin", "accountant", "viewer")),
+):
+    png_data, filename, _ = build_month_report_png(month_id, preset=preset, pixel_ratio=pixel_ratio, dpi=dpi)
     return Response(
         content=png_data,
         media_type="image/png",
