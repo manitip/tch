@@ -2095,14 +2095,34 @@ class AuthOut(BaseModel):
     user: Dict[str, Any]
 
 
+def auth_trace(event: str, request: Request, **details: Any) -> None:
+    """Lightweight auth diagnostics to stdout for local debugging."""
+    client_host = request.client.host if request.client else "-"
+    payload = {
+        "event": event,
+        "path": request.url.path,
+        "client": client_host,
+        "ua": (request.headers.get("user-agent") or "")[:140],
+        "has_auth": bool(request.headers.get("authorization")),
+        "has_x_tg_webapp": bool(request.headers.get("x-telegram-webapp")),
+        "has_x_tg_init": bool(request.headers.get("x-telegram-init-data")),
+    }
+    payload.update(details)
+    print(f"[AUTH] {payload}")
+
+
 def get_bearer_token(request: Request) -> str:
     h = request.headers.get("Authorization", "").strip()
     if not h.lower().startswith("bearer "):
         token = request.query_params.get("token", "").strip()
         if token:
+            auth_trace("bearer_from_query", request)
             return token
+        auth_trace("missing_bearer", request)
         raise HTTPException(status_code=401, detail="Missing Authorization Bearer token")
-    return h.split(" ", 1)[1].strip()
+    token = h.split(" ", 1)[1].strip()
+    auth_trace("bearer_from_header", request, token_len=len(token))
+    return token
 
 
 def get_current_user(request: Request) -> sqlite3.Row:
@@ -3404,6 +3424,7 @@ def cashapp():
 
 @APP.post("/api/auth/telegram", response_model=AuthOut)
 def auth_telegram(body: AuthTelegramIn, request: Request):
+    auth_trace("auth_telegram_start", request, initData_len=len(body.initData or ""))
     user_obj = validate_telegram_init_data(body.initData, CFG.BOT_TOKEN)
     telegram_id = int(user_obj.get("id", 0))
     if not telegram_id:
@@ -3412,20 +3433,24 @@ def auth_telegram(body: AuthTelegramIn, request: Request):
     allow = refresh_allowlist_if_needed()
     allow_user = allow.get(telegram_id)
     if not allow_user or not allow_user.get("active"):
+        auth_trace("auth_telegram_forbidden", request, telegram_id=telegram_id)
         raise HTTPException(status_code=403, detail="User not in allowlist or inactive")
 
     # sync single user from allowlist (in case file changed)
     sync_allowlist_to_db({telegram_id: allow_user})
 
+    auth_trace("auth_telegram_ok", request, telegram_id=telegram_id)
     return issue_session_token_for_user(telegram_id)
 
 
 @APP.post("/api/auth/telegram/unsafe", response_model=AuthOut)
 def auth_telegram_unsafe(body: AuthTelegramUnsafeIn, request: Request):
     telegram_id = int(body.telegram_id)
+    auth_trace("auth_telegram_unsafe_start", request, telegram_id=telegram_id)
     allow = refresh_allowlist_if_needed()
     allow_user = allow.get(telegram_id)
     if not allow_user or not allow_user.get("active"):
+        auth_trace("auth_telegram_unsafe_forbidden", request, telegram_id=telegram_id)
         raise HTTPException(status_code=403, detail="User not in allowlist or inactive")
 
     # sync single user from allowlist (in case file changed)
@@ -3438,8 +3463,10 @@ def auth_telegram_unsafe(body: AuthTelegramUnsafeIn, request: Request):
         or bool(request.headers.get("x-telegram-webapp"))
     )
     if not has_tg_hint:
+        auth_trace("auth_telegram_unsafe_no_tg_hint", request, telegram_id=telegram_id)
         raise HTTPException(status_code=401, detail="Unsafe auth is allowed only from Telegram client")
 
+    auth_trace("auth_telegram_unsafe_ok", request, telegram_id=telegram_id)
     return issue_session_token_for_user(telegram_id)
 
 

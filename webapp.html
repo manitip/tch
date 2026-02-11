@@ -3606,8 +3606,20 @@
         if (API.token) headers["Authorization"] = `Bearer ${API.token}`;
         const res = await fetch(`${API.baseUrl}${path}`, { ...opts, headers });
         if (res.status === 401 || res.status === 403) {
-          // bubble for caller to reauth UI if needed
           const txt = await res.text().catch(()=> "");
+          API.authDebug("req:unauthorized", { path, status: res.status, detail: txt || "Unauthorized" });
+          if (!opts.__reauthTried && !path.startsWith("/api/auth/telegram")) {
+            try {
+              API.token = null;
+              localStorage.removeItem("sessionToken");
+              localStorage.removeItem("sessionUser");
+              await API.auth();
+              return API.req(path, { ...opts, __reauthTried: true });
+            } catch (reauthErr) {
+              API.authDebug("req:reauth-failed", String(reauthErr?.message || reauthErr));
+            }
+          }
+          // bubble for caller to reauth UI if needed
           throw new Error(`${res.status}: ${txt || "Unauthorized"}`);
         }
         if (!res.ok) {
