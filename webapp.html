@@ -1376,6 +1376,11 @@
       display:block;
       animation: screenIn .20s ease forwards;
     }
+    #screenSettings.active{
+      animation: none;
+      opacity: 1;
+      transform: none;
+    }
     @keyframes screenIn{
       to { opacity: 1; transform: translateX(0); }
     }
