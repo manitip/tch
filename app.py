@@ -45,6 +45,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.jobstores.base import JobLookupError
 from zoneinfo import ZoneInfo
 
 # aiogram v3
@@ -1307,12 +1308,26 @@ def verify_session_token(token: str, secret: str) -> Dict[str, Any]:
     except ValueError:
         raise HTTPException(status_code=401, detail="Invalid token format")
 
-    expected = hmac.new(secret.encode("utf-8"), body.encode("utf-8"), hashlib.sha256).digest()
-    if not hmac.compare_digest(_b64url_decode(sig), expected):
+    try:
+        provided_sig = _b64url_decode(sig)
+    except Exception:
         raise HTTPException(status_code=401, detail="Invalid token signature")
 
-    payload = json.loads(_b64url_decode(body).decode("utf-8"))
-    exp = int(payload.get("exp", 0))
+    expected = hmac.new(secret.encode("utf-8"), body.encode("utf-8"), hashlib.sha256).digest()
+    if not hmac.compare_digest(provided_sig, expected):
+        raise HTTPException(status_code=401, detail="Invalid token signature")
+
+    try:
+        payload_raw = _b64url_decode(body).decode("utf-8")
+        payload = json.loads(payload_raw)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token payload")
+
+    try:
+        exp = int(payload.get("exp", 0))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=401, detail="Invalid token payload")
+
     if exp and int(time.time()) > exp:
         raise HTTPException(status_code=401, detail="Token expired")
     return payload
@@ -1434,7 +1449,8 @@ def get_or_create_month(year: int, month: int) -> sqlite3.Row:
         (year, month, 0.0, float(start_balance), None, now, now),
     )
     m2 = db_fetchone("SELECT * FROM months WHERE id=?;", (new_id,))
-    assert m2 is not None
+    if not m2:
+        raise HTTPException(status_code=500, detail="Failed to create month")
     return m2
 
 
@@ -2969,8 +2985,8 @@ def parse_hhmm(s: str, default_h: int, default_m: int) -> Tuple[int, int]:
         m = int(mm)
         if 0 <= h <= 23 and 0 <= m <= 59:
             return h, m
-    except Exception:
-        pass
+    except (AttributeError, ValueError):
+        return default_h, default_m
     return default_h, default_m
 
 
@@ -2979,8 +2995,8 @@ def reschedule_jobs() -> None:
     for job_id in ("job_sunday_report", "job_daily_expenses", "job_backup_daily"):
         try:
             scheduler.remove_job(job_id)
-        except Exception:
-            pass
+        except JobLookupError:
+            continue
 
     s = get_settings()
     tz_name = str(s["timezone"] or CFG.TZ)
@@ -3038,15 +3054,15 @@ async def run_job_with_logging(job_id: str, coro: Awaitable[None]) -> None:
                 details={"error": str(exc)},
                 trace=trace,
             )
-        except Exception:
-            pass
+        except sqlite3.Error:
+            traceback.print_exc()
     finally:
         finished_at = iso_now(tzinfo)
         duration_ms = int((time.perf_counter() - started_ts) * 1000)
         try:
             log_job_run(job_id, status, started_at, finished_at, duration_ms, error)
-        except Exception:
-            pass
+        except sqlite3.Error:
+            traceback.print_exc()
 
 
 
@@ -4941,7 +4957,10 @@ async def api_restore_backup(
         raise HTTPException(status_code=400, detail="Missing file")
     tzinfo = backups_tzinfo()
     temp_dir = Path(tempfile.mkdtemp(prefix="restore_"))
-    temp_file = temp_dir / (file.filename or "backup_upload")
+    safe_filename = Path(file.filename or "backup_upload").name
+    if not safe_filename:
+        safe_filename = "backup_upload"
+    temp_file = temp_dir / safe_filename
     backup_db_path = None
     try:
         with temp_file.open("wb") as f:
