@@ -1426,7 +1426,9 @@
           setStatus("Нет данных авторизации", "error");
           return false;
         }
-        if (initData && !API.token){
+        if (initData){
+          // Всегда переавторизуемся по initData, чтобы не использовать токен
+          // от другого Telegram-аккаунта из localStorage.
           const res = await API.post("/api/auth/telegram", { initData });
           if (res?.token) API.setToken(res.token);
           if (res?.user) applyUser(res.user);
