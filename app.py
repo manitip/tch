@@ -56,6 +56,8 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
     WebAppInfo,
 )
 
@@ -2255,6 +2257,29 @@ def main_menu_kb(role: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+def persistent_menu_kb(role: str) -> Optional[ReplyKeyboardMarkup]:
+    if role == "cash_signer":
+        cashapp_url = cashapp_webapp_url()
+        if not cashapp_url:
+            return None
+        return ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="Наличные / Подписи", web_app=WebAppInfo(url=cashapp_url))]],
+            resize_keyboard=True,
+            is_persistent=True,
+        )
+
+    if role in {"admin", "accountant"}:
+        webapp_url = require_https_webapp_url(CFG.WEBAPP_URL)
+        if not webapp_url:
+            return None
+        return ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="Открыть бухгалтерию", web_app=WebAppInfo(url=webapp_url))]],
+            resize_keyboard=True,
+            is_persistent=True,
+        )
+    return None
+
+
 def confirm_kb(kind: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -2437,9 +2462,10 @@ async def on_start(m: Message):
         register_bot_subscriber(tid)
 
     role = get_user_role_from_db(tid)
+    persistent_menu = persistent_menu_kb(role)
     await m.answer(
         "Меню бухгалтерии:",
-        reply_markup=main_menu_kb(role),
+        reply_markup=persistent_menu or main_menu_kb(role),
     )
     webapp_url = require_https_webapp_url(CFG.WEBAPP_URL)
     cashapp_url = cashapp_webapp_url()
