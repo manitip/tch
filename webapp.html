@@ -1432,7 +1432,7 @@
       z-index: 1;
     }
     .dropdown.open{
-      z-index: 5;
+      z-index: 5000;
     }
     .dropdownTrigger{
       width: 100%;
@@ -1488,7 +1488,7 @@
       overflow: hidden;
       pointer-events: none;
       transition: max-height .24s ease, opacity .18s ease, transform .18s ease;
-      z-index: 200;
+      z-index: 5100;
     }
     .dropdown.open-up .dropdownPanel{
       top: auto;
@@ -1506,13 +1506,13 @@
     }
     #histMonthDropdown.open,
     #histCategoryDropdown.open{
-      z-index: 1200;
+      z-index: 5000;
     }
     #histMonthDropdown .dropdownPanel,
     #histCategoryDropdown .dropdownPanel,
     #yearDropdown .dropdownPanel,
     #monthDropdown .dropdownPanel{
-      z-index: 1300;
+      z-index: 5100;
     }
     .dropdown.open-up.open .dropdownPanel{
       transform: translateY(0) scale(1);
