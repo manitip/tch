@@ -3101,6 +3101,18 @@ async def run_sunday_report_job() -> None:
         today = dt.datetime.now(tzinfo).date()
         await send_sunday_reports_bundle(today, recipients, raise_on_error=False)
 
+        month_row = get_or_create_month(today.year, today.month)
+        png_data, filename, month_meta = build_month_report_png(int(month_row["id"]), preset="landscape", pixel_ratio=2, dpi=192)
+        caption = f"PNG-отчёт за {RU_MONTHS[int(month_meta['month']) - 1]} {int(month_meta['year'])}"
+        await send_report_png_to_recipients(
+            png_data,
+            filename,
+            caption,
+            recipients,
+            raise_on_error=False,
+            kind="report_png",
+        )
+
     await run_job_with_logging("sunday_report", _job())
 
 async def run_daily_expenses_job() -> None:
@@ -4872,7 +4884,7 @@ async def api_report_sunday(u: sqlite3.Row = Depends(require_role("admin", "acco
 
     tzinfo = ZoneInfo(str(s["timezone"] or CFG.TZ))
     today = dt.datetime.now(tzinfo).date()
-    await send_sunday_reports_bundle(today, recipients, raise_on_error=False)
+    await send_sunday_reports_bundle(today, recipients, raise_on_error=True)
     return {"ok": True}
 
 

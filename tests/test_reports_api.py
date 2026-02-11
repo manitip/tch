@@ -24,7 +24,7 @@ class ReportsApiTests(unittest.TestCase):
                 called_today, called_recipients = bundle_mock.await_args.args[:2]
                 self.assertIsInstance(called_today, app.dt.date)
                 self.assertEqual(called_recipients, recipients)
-                self.assertFalse(bundle_mock.await_args.kwargs["raise_on_error"])
+                self.assertTrue(bundle_mock.await_args.kwargs["raise_on_error"])
 
         asyncio.run(_run())
 
