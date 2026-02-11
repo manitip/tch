@@ -7425,12 +7425,8 @@
       }
       panel.classList.remove("hidden");
       panel.setAttribute("aria-hidden", "false");
-      resetPanelScroll();
-      requestAnimationFrame(()=> {
-        panel.classList.add("open");
-        resetPanelScroll();
-      });
-      setTimeout(resetPanelScroll, 120);
+      body.scrollTop = 0;
+      requestAnimationFrame(()=> panel.classList.add("open"));
       if (sectionId === "cashflowSection"){
         setCashflowTab("requests");
         loadCashflowRequests().catch(()=> {});
