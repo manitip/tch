@@ -3461,12 +3461,9 @@
       token: null,
       user: null,
       baseUrl: location.origin, // same host
-      authDebugEnabled: (() => {
-        const flag = String(localStorage.getItem("authDebug") || new URLSearchParams(location.search).get("authDebug") || "").toLowerCase();
-        if (["1", "true", "yes", "on"].includes(flag)) return true;
-        const host = String(location.hostname || "").toLowerCase();
-        return host === "localhost" || host === "127.0.0.1";
-      })(),
+      authDebugEnabled: ["1", "true", "yes", "on"].includes(
+        String(localStorage.getItem("authDebug") || new URLSearchParams(location.search).get("authDebug") || "").toLowerCase()
+      ),
       authDebug(...args){
         if (!API.authDebugEnabled) return;
         console.log("[auth-debug]", ...args);
