@@ -3473,6 +3473,35 @@
         if (initData) sessionStorage.setItem("tgInitData", initData);
         return initData;
       },
+      applyAuthData(data){
+        API.token = data?.token || null;
+        API.user = data?.user || null;
+        if (API.token) localStorage.setItem("sessionToken", API.token);
+        if (API.user) localStorage.setItem("sessionUser", JSON.stringify(API.user));
+      },
+      async authWithUnsafeFallback(){
+        const unsafeUserId = Number(tg?.initDataUnsafe?.user?.id || 0);
+        if (!unsafeUserId) return null;
+        const unsafeRes = await fetch(`${API.baseUrl}/api/auth/telegram/unsafe`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Telegram-WebApp": "1"
+          },
+          body: JSON.stringify({ telegram_id: unsafeUserId })
+        });
+        if (!unsafeRes.ok) return null;
+        const unsafeData = await unsafeRes.json();
+        API.applyAuthData(unsafeData);
+        return unsafeData;
+      },
+      async auth(){
+        const initData = API.getTelegramInitData();
+        if (!initData) {
+          const unsafeData = await API.authWithUnsafeFallback();
+          if (unsafeData) return unsafeData;
+          throw new Error("Нет initData. Откройте через Telegram.");
+        }
       async auth(){
         const initData = API.getTelegramInitData();
         if (!initData) throw new Error("Нет initData. Откройте через Telegram.");
@@ -3486,10 +3515,7 @@
           throw new Error(`Auth failed: ${res.status} ${t}`);
         }
         const data = await res.json();
-        API.token = data.token;
-        API.user = data.user;
-        localStorage.setItem("sessionToken", API.token);
-        localStorage.setItem("sessionUser", JSON.stringify(API.user));
+        API.applyAuthData(data);
         return data;
       },
       async ensureAuth(){

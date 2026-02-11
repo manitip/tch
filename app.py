@@ -2086,6 +2086,10 @@ class AuthTelegramIn(BaseModel):
     initData: str = Field(..., description="Telegram WebApp initData string")
 
 
+class AuthTelegramUnsafeIn(BaseModel):
+    telegram_id: int = Field(..., gt=0, description="Telegram user id from initDataUnsafe")
+
+
 class AuthOut(BaseModel):
     token: str
     user: Dict[str, Any]
@@ -2123,6 +2127,23 @@ def require_role(*allowed_roles: str):
             raise HTTPException(status_code=403, detail="Insufficient role")
         return u
     return _dep
+
+
+def issue_session_token_for_user(telegram_id: int) -> Dict[str, Any]:
+    refresh_allowlist_if_needed()
+    u = db_fetchone("SELECT * FROM users WHERE telegram_id=?;", (int(telegram_id),))
+    if not u or int(u["active"]) != 1:
+        raise HTTPException(status_code=403, detail="User inactive")
+    exp = int(time.time()) + 7 * 24 * 3600
+    token = make_session_token(
+        {
+            "telegram_id": int(telegram_id),
+            "role": str(u["role"]),
+            "exp": exp,
+        },
+        CFG.SESSION_SECRET,
+    )
+    return {"token": token, "user": {"telegram_id": int(telegram_id), "name": u["name"], "role": u["role"]}}
 
 
 # ---------------------------
@@ -3396,21 +3417,30 @@ def auth_telegram(body: AuthTelegramIn, request: Request):
     # sync single user from allowlist (in case file changed)
     sync_allowlist_to_db({telegram_id: allow_user})
 
-    u = db_fetchone("SELECT * FROM users WHERE telegram_id=?;", (telegram_id,))
-    if not u or int(u["active"]) != 1:
-        raise HTTPException(status_code=403, detail="User inactive")
+    return issue_session_token_for_user(telegram_id)
 
-    # session token
-    exp = int(time.time()) + 7 * 24 * 3600
-    token = make_session_token(
-        {
-            "telegram_id": telegram_id,
-            "role": str(u["role"]),
-            "exp": exp,
-        },
-        CFG.SESSION_SECRET,
+
+@APP.post("/api/auth/telegram/unsafe", response_model=AuthOut)
+def auth_telegram_unsafe(body: AuthTelegramUnsafeIn, request: Request):
+    telegram_id = int(body.telegram_id)
+    allow = refresh_allowlist_if_needed()
+    allow_user = allow.get(telegram_id)
+    if not allow_user or not allow_user.get("active"):
+        raise HTTPException(status_code=403, detail="User not in allowlist or inactive")
+
+    # sync single user from allowlist (in case file changed)
+    sync_allowlist_to_db({telegram_id: allow_user})
+
+    ua = (request.headers.get("user-agent") or "").lower()
+    has_tg_hint = (
+        "telegram" in ua
+        or bool(request.headers.get("x-telegram-init-data"))
+        or bool(request.headers.get("x-telegram-webapp"))
     )
-    return {"token": token, "user": {"telegram_id": telegram_id, "name": u["name"], "role": u["role"]}}
+    if not has_tg_hint:
+        raise HTTPException(status_code=401, detail="Unsafe auth is allowed only from Telegram client")
+
+    return issue_session_token_for_user(telegram_id)
 
 
 @APP.get("/api/me")
