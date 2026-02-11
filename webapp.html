@@ -1432,7 +1432,7 @@
       z-index: 1;
     }
     .dropdown.open{
-      z-index: 5;
+      z-index: 5000;
     }
     .dropdownTrigger{
       width: 100%;
@@ -1468,10 +1468,10 @@
       transform: rotate(180deg);
     }
     .dropdownPanel{
-      position: absolute;
-      top: calc(100% + 6px);
+      position: fixed;
+      top: 0;
       left: 0;
-      right: 0;
+      right: auto;
       background: var(--card);
       border: 1px solid var(--stroke);
       border-radius: 16px;
@@ -1488,14 +1488,13 @@
       overflow: hidden;
       pointer-events: none;
       transition: max-height .24s ease, opacity .18s ease, transform .18s ease;
-      z-index: 200;
+      z-index: 5100;
     }
-    .dropdown.open-up .dropdownPanel{
-      top: auto;
-      bottom: calc(100% + 6px);
+    .dropdownPanel.open-up{
       transform: translateY(6px) scale(.98);
     }
-    .dropdown.open .dropdownPanel{
+    .dropdown.open .dropdownPanel,
+    .dropdownPanel.open{
       max-height: 260px;
       opacity: 1;
       transform: translateY(0) scale(1);
@@ -1506,15 +1505,16 @@
     }
     #histMonthDropdown.open,
     #histCategoryDropdown.open{
-      z-index: 1200;
+      z-index: 5000;
     }
     #histMonthDropdown .dropdownPanel,
     #histCategoryDropdown .dropdownPanel,
     #yearDropdown .dropdownPanel,
     #monthDropdown .dropdownPanel{
-      z-index: 1300;
+      z-index: 5100;
     }
-    .dropdown.open-up.open .dropdownPanel{
+    .dropdown.open-up.open .dropdownPanel,
+    .dropdownPanel.open-up.open{
       transform: translateY(0) scale(1);
     }
     .dropdownOption{
@@ -5559,6 +5559,10 @@
         });
       };
       buildOptions();
+      if (!panel.dataset.portalMounted) {
+        panel.dataset.portalMounted = "true";
+        document.body.appendChild(panel);
+      }
 
       const sync = ()=>{
         buildOptions();
@@ -5581,23 +5585,31 @@
         const spaceBelow = window.innerHeight - rect.bottom - 8;
         const spaceAbove = rect.top - 8;
         const openUp = spaceBelow < panelHeight && spaceAbove > spaceBelow;
+
         dropdown.classList.toggle("open-up", openUp);
+        panel.classList.toggle("open-up", openUp);
+
         const available = openUp ? spaceAbove : spaceBelow;
-        if (available > 0) {
-          panel.style.maxHeight = `${Math.min(panelHeight, available)}px`;
-        } else {
-          panel.style.maxHeight = `${panelHeight}px`;
-        }
+        const nextHeight = available > 0 ? Math.min(panelHeight, available) : panelHeight;
+        panel.style.maxHeight = `${nextHeight}px`;
+        panel.style.width = `${rect.width}px`;
+        panel.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - rect.width - 8))}px`;
+        panel.style.right = "auto";
+        panel.style.top = openUp ? "auto" : `${rect.bottom + 6}px`;
+        panel.style.bottom = openUp ? `${window.innerHeight - rect.top + 6}px` : "auto";
       };
 
       const open = ()=>{
         positionPanel();
         dropdown.classList.add("open");
+        panel.classList.add("open");
         trigger.setAttribute("aria-expanded", "true");
       };
       const close = ()=>{
         dropdown.classList.remove("open");
         dropdown.classList.remove("open-up");
+        panel.classList.remove("open");
+        panel.classList.remove("open-up");
         panel.style.maxHeight = "";
         trigger.setAttribute("aria-expanded", "false");
       };
@@ -5620,8 +5632,11 @@
         close();
       });
       document.addEventListener("click", (e)=>{
-        if (!dropdown.contains(e.target)) close();
+        if (!dropdown.contains(e.target) && !panel.contains(e.target)) close();
       });
+      document.addEventListener("scroll", ()=>{
+        if (dropdown.classList.contains("open")) positionPanel();
+      }, true);
       document.addEventListener("keydown", (e)=>{
         if (e.key === "Escape") close();
       });
