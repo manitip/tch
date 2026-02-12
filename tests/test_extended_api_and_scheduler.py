@@ -1,10 +1,11 @@
+import datetime as dt
 import json
 import os
 import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi.testclient import TestClient
 
@@ -207,6 +208,64 @@ class SchedulerEdgeCaseTests(unittest.TestCase):
         trigger_repr = str(sunday_call.kwargs["trigger"])
         self.assertIn("day_of_week='sun'", trigger_repr)
         self.assertIn("hour='18'", trigger_repr)
+
+
+class AdminReportScheduleTests(BaseDbTestCase):
+    def setUp(self):
+        super().setUp()
+        self.client = TestClient(app.APP)
+
+    def test_admin_settings_apply_custom_report_time_to_scheduler(self):
+        admin = self._insert_user(777, "admin", "Admin")
+        app.APP.dependency_overrides[app.get_current_user] = lambda: admin
+
+        payload = {
+            "sunday_report_time": "07:35",
+            "month_report_time": "22:10",
+            "daily_expenses_enabled": True,
+            "timezone": "Europe/Warsaw",
+        }
+
+        fake_scheduler = Mock()
+        with patch.object(app, "scheduler", fake_scheduler):
+            resp = self.client.put("/api/settings", json=payload)
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(fake_scheduler.remove_job.call_count, 3)
+        self.assertEqual(fake_scheduler.add_job.call_count, 3)
+
+        jobs = {call.kwargs["id"]: call.kwargs for call in fake_scheduler.add_job.call_args_list}
+        sunday_trigger = jobs["job_sunday_report"]["trigger"]
+        daily_trigger = jobs["job_daily_expenses"]["trigger"]
+
+        now = dt.datetime(2026, 2, 2, 6, 0, tzinfo=dt.timezone.utc)
+        next_sunday_run = sunday_trigger.get_next_fire_time(None, now)
+        next_daily_run = daily_trigger.get_next_fire_time(None, now)
+
+        self.assertEqual(next_sunday_run.weekday(), 6)  # Sunday
+        self.assertEqual((next_sunday_run.hour, next_sunday_run.minute), (7, 35))
+        self.assertEqual((next_daily_run.hour, next_daily_run.minute), (22, 10))
+
+        def _consume_task(coro):
+            coro.close()
+            return Mock()
+
+        with patch.object(app, "run_sunday_report_job", new=AsyncMock()) as sunday_job, \
+             patch.object(app, "run_daily_expenses_job", new=AsyncMock()) as daily_job, \
+             patch.object(app.asyncio, "create_task", side_effect=_consume_task) as create_task:
+            jobs["job_sunday_report"]["func"]()
+            jobs["job_daily_expenses"]["func"]()
+
+        self.assertEqual(create_task.call_count, 2)
+        self.assertEqual(sunday_job.call_count, 1)
+        self.assertEqual(daily_job.call_count, 1)
+
+        settings_resp = self.client.get("/api/settings")
+        self.assertEqual(settings_resp.status_code, 200)
+        updated = settings_resp.json()
+        self.assertEqual(updated["sunday_report_time"], "07:35")
+        self.assertEqual(updated["month_report_time"], "22:10")
+        self.assertTrue(updated["daily_expenses_enabled"])
 
 
 if __name__ == "__main__":
