@@ -2694,11 +2694,7 @@
                         <button id="sendTestReportBtn" class="btn small" type="button">
                           <span class="icon">check_circle</span> Тест отправки отчёта
                         </button>
-                        <button id="runFullSystemTestBtn" class="btn small" type="button">
-                          <span class="icon">fact_check</span> Полное тестирование систем
-                        </button>
                       </div>
-                      <div id="fullSystemTestResult" class="tiny muted2 hidden"></div>
                       <div class="tiny muted2">Важно: chat_id должен быть установлен заранее.</div>
                     </div>
                   </div>
@@ -7331,16 +7327,6 @@
       loadMonitorList(which);
     }
 
-    function renderFullSystemTestResult(payload){
-      const box = $("#fullSystemTestResult");
-      if (!box) return;
-      const checks = Array.isArray(payload?.checks) ? payload.checks : [];
-      const mark = (status)=> status === "ok" ? "✅" : (status === "warn" ? "⚠️" : "❌");
-      const lines = checks.map((c)=> `${mark(c.status)} ${c.name}`);
-      box.textContent = `Статус: ${payload?.status || "unknown"}. ${lines.join(" · ")}`;
-      box.classList.remove("hidden");
-    }
-
     const SettingsMenuConfig = [
       {
         id: "reportsSection",
@@ -8363,21 +8349,6 @@
       });
       $("#sendTestReportBtn").addEventListener("click", async ()=>{
         try{ await API.post("/api/reports/test", {}); setToast("Тест отправлен"); } catch(e){ alert(String(e.message||e)); }
-      });
-      $("#runFullSystemTestBtn").addEventListener("click", async ()=>{
-        try{
-          const res = await API.post("/api/admin/system/full-test", {});
-          renderFullSystemTestResult(res);
-          if (res?.status === "ok"){
-            setToast("Полное тестирование завершено успешно");
-          } else if (res?.status === "warn"){
-            setToast("Тестирование завершено с предупреждениями");
-          } else {
-            setToast("Тестирование выявило ошибки");
-          }
-        } catch(e){
-          alert(String(e.message||e));
-        }
       });
 
       $("#saveMonthSettingsBtn").addEventListener("click", async ()=>{
