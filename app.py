@@ -5726,6 +5726,26 @@ def render_month_report_png(
             draw.text((sub_table_x0 + int(8 * scale), y + int(2 * scale)), "Расходы", font=font_small, fill=color_muted)
             draw.text((sub_table_x0 + col_date_w + int(8 * scale), y + int(2 * scale)), fmt_money(sub_spend["praise"]), font=font_small, fill=color_danger)
             draw.text((sub_table_x0 + col_date_w + col_w + int(8 * scale), y + int(2 * scale)), fmt_money(sub_spend["alpha"]), font=font_small, fill=color_danger)
+            y += row_h
+
+        if y + row_h <= sub_table_y1:
+            sub_balances = summary.get("subaccounts") if isinstance(summary, dict) else {}
+            praise_balance = float((sub_balances or {}).get("praise", {}).get("balance") or 0.0)
+            alpha_balance = float((sub_balances or {}).get("alpha", {}).get("balance") or 0.0)
+            draw.line((sub_table_x0, y, sub_table_x1, y), fill=color_stroke, width=max(1, int(1 * scale)))
+            draw.text((sub_table_x0 + int(8 * scale), y + int(2 * scale)), "Остаток", font=font_small, fill=color_muted)
+            draw.text(
+                (sub_table_x0 + col_date_w + int(8 * scale), y + int(2 * scale)),
+                fmt_money(praise_balance),
+                font=font_small,
+                fill=(color_accent if praise_balance >= 0 else color_danger),
+            )
+            draw.text(
+                (sub_table_x0 + col_date_w + col_w + int(8 * scale), y + int(2 * scale)),
+                fmt_money(alpha_balance),
+                font=font_small,
+                fill=(color_accent if alpha_balance >= 0 else color_danger),
+            )
 
     # --- ALL EXPENSES LIST ---
     list_card_y = section_y + top_h + gap
