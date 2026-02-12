@@ -25,7 +25,7 @@ import shutil
 import tempfile
 import zipfile
 from contextlib import asynccontextmanager
-from typing import Any, Awaitable, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 from fastapi import (
     BackgroundTasks,
@@ -504,6 +504,54 @@ def init_db() -> None:
             created_at TEXT NOT NULL
         );
         """
+    )
+
+    # diagnostics runs
+    db_exec(
+        """
+        CREATE TABLE IF NOT EXISTS diagnostic_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            created_by_user_id INTEGER NULL,
+            suite TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            status TEXT NOT NULL,
+            started_at TEXT NULL,
+            finished_at TEXT NULL,
+            duration_ms INTEGER NULL,
+            options_json TEXT NOT NULL,
+            summary_json TEXT NULL,
+            FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+        );
+        """
+    )
+    db_exec(
+        "CREATE INDEX IF NOT EXISTS idx_diag_runs_created ON diagnostic_runs(created_at DESC);"
+    )
+    db_exec(
+        "CREATE INDEX IF NOT EXISTS idx_diag_runs_status ON diagnostic_runs(status, created_at DESC);"
+    )
+
+    db_exec(
+        """
+        CREATE TABLE IF NOT EXISTS diagnostic_steps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER NOT NULL,
+            key TEXT NOT NULL,
+            title TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            status TEXT NOT NULL,
+            started_at TEXT NULL,
+            finished_at TEXT NULL,
+            duration_ms INTEGER NULL,
+            message TEXT NULL,
+            details_json TEXT NULL,
+            FOREIGN KEY (run_id) REFERENCES diagnostic_runs(id) ON DELETE CASCADE
+        );
+        """
+    )
+    db_exec(
+        "CREATE INDEX IF NOT EXISTS idx_diag_steps_run ON diagnostic_steps(run_id, id);"
     )
 
     # Ensure settings row exists (id=1)
@@ -4861,6 +4909,434 @@ def api_monitor_deliveries(
         tuple(params),
     )
     return {"items": [dict(r) for r in rows]}
+
+
+# ---------------------------
+# Diagnostics API
+# ---------------------------
+
+DIAG_RUNNING_TASKS: Dict[int, asyncio.Task] = {}
+DIAG_CANCEL_EVENTS: Dict[int, asyncio.Event] = {}
+
+
+def _mask_secret(value: str) -> str:
+    v = str(value or "")
+    if len(v) <= 8:
+        return "***"
+    return f"{v[:4]}***{v[-4:]}"
+
+
+def _json_loads(raw: Optional[str], fallback: Any) -> Any:
+    if not raw:
+        return fallback
+    try:
+        return json.loads(raw)
+    except Exception:
+        return fallback
+
+
+class DiagnosticsRunOptions(BaseModel):
+    telegram_send_test: bool = False
+    telegram_target_id: Optional[int] = None
+    backup_full: bool = False
+    timeout_sec: int = Field(default=120, ge=10, le=1800)
+
+
+class DiagnosticsRunIn(BaseModel):
+    suite: str = Field(default="quick")
+    mode: str = Field(default="safe")
+    options: DiagnosticsRunOptions = Field(default_factory=DiagnosticsRunOptions)
+
+
+class DiagnosticsContext:
+    def __init__(self, run_id: int, suite: str, mode: str, options: DiagnosticsRunOptions):
+        self.run_id = int(run_id)
+        self.suite = suite
+        self.mode = mode
+        self.options = options
+        self.cancel_event: asyncio.Event = DIAG_CANCEL_EVENTS.get(run_id, asyncio.Event())
+        self.sandbox_dir: Optional[Path] = None
+        self.sandbox_db: Optional[Path] = None
+
+    def selected_db_path(self) -> Path:
+        return self.sandbox_db or Path(CFG.DB_PATH)
+
+
+class DiagnosticsCheck:
+    def __init__(
+        self,
+        key: str,
+        title: str,
+        severity: str,
+        allowed_modes: Set[str],
+        fn: Callable[[DiagnosticsContext], Awaitable[Dict[str, Any]]],
+    ):
+        self.key = key
+        self.title = title
+        self.severity = severity
+        self.allowed_modes = allowed_modes
+        self.fn = fn
+
+
+async def _diag_check_preflight(ctx: DiagnosticsContext) -> Dict[str, Any]:
+    required = {
+        "BOT_TOKEN": CFG.BOT_TOKEN,
+        "DB_PATH": CFG.DB_PATH,
+        "USERS_JSON": CFG.USERS_JSON_PATH,
+        "APP_URL": CFG.APP_URL,
+        "WEBAPP_URL": CFG.WEBAPP_URL,
+        "TIMEZONE": CFG.TZ,
+    }
+    missing = [k for k, v in required.items() if not str(v or "").strip()]
+    users_raw = Path(CFG.USERS_JSON_PATH).read_text(encoding="utf-8")
+    users = json.loads(users_raw)
+    users = users.get("users") if isinstance(users, dict) else users
+    has_admin = any(int(u.get("active", 1)) == 1 and str(u.get("role", "")) == "admin" for u in (users or []))
+    if not has_admin:
+        raise RuntimeError("No active admin in users.json")
+    for name in ("webapp.html", "cashapp.html"):
+        if not (BASE_DIR / name).exists():
+            raise RuntimeError(f"Missing template: {name}")
+    for d in (ATTACHMENTS_DIR, BACKUPS_DIR):
+        d.mkdir(parents=True, exist_ok=True)
+        test = d / f".diag_write_{ctx.run_id}"
+        test.write_text("ok", encoding="utf-8")
+        test.unlink(missing_ok=True)
+    details = {
+        "missing": missing,
+        "token_masked": _mask_secret(CFG.BOT_TOKEN),
+    }
+    if missing:
+        return {"status": "warn", "message": "Missing required env vars", "details": details}
+    return {"status": "success", "message": "Preflight checks passed", "details": details}
+
+
+async def _diag_check_db_integrity(ctx: DiagnosticsContext) -> Dict[str, Any]:
+    required_tables = [
+        "users", "months", "expenses", "categories", "tags", "drafts", "attachments",
+        "settings", "system_logs", "job_runs", "message_deliveries",
+    ]
+    path = ctx.selected_db_path()
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=ON;")
+        tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table';")}
+        missing = [t for t in required_tables if t not in tables]
+        integ = conn.execute("PRAGMA integrity_check;").fetchone()[0]
+    details = {"db_path": str(path), "missing_tables": missing, "integrity": integ}
+    if missing or integ.lower() != "ok":
+        return {"status": "fail", "message": "DB integrity check failed", "details": details}
+    return {"status": "success", "message": "DB integrity check OK", "details": details}
+
+
+async def _diag_check_scheduler(ctx: DiagnosticsContext) -> Dict[str, Any]:
+    reschedule_jobs()
+    jobs = [j.id for j in scheduler.get_jobs()]
+    expected = {"sunday_report", "month_report", "daily_expenses"}
+    missing = sorted(expected - set(jobs))
+    if missing:
+        return {"status": "warn", "message": "Some scheduler jobs are missing", "details": {"missing": missing, "jobs": jobs}}
+    return {"status": "success", "message": "Scheduler jobs present", "details": {"jobs": jobs}}
+
+
+async def _diag_check_sandbox_crud(ctx: DiagnosticsContext) -> Dict[str, Any]:
+    if ctx.mode == "safe":
+        return {"status": "skipped", "message": "CRUD skipped in SAFE mode", "details": {}}
+    with sqlite3.connect(ctx.selected_db_path()) as conn:
+        conn.row_factory = sqlite3.Row
+        now = iso_now(CFG.tzinfo())
+        conn.execute("INSERT INTO users (telegram_id, name, role, active, created_at) VALUES (?, ?, ?, 1, ?);", (9000000 + ctx.run_id, "Diag", "admin", now))
+        user_id = int(conn.execute("SELECT id FROM users WHERE telegram_id=?;", (9000000 + ctx.run_id,)).fetchone()[0])
+        conn.execute("INSERT INTO months (year, month, monthly_min_needed, start_balance, created_at, updated_at) VALUES (?, ?, 0, 0, ?, ?);", (2090, (ctx.run_id % 12) + 1, now, now))
+        month_id = int(conn.execute("SELECT id FROM months WHERE year=2090 ORDER BY id DESC LIMIT 1;").fetchone()[0])
+        conn.execute("INSERT INTO categories (name, is_active, sort_order, created_at, updated_at) VALUES (?, 1, 0, ?, ?);", (f"diag-{ctx.run_id}", now, now))
+        category_id = int(conn.execute("SELECT id FROM categories WHERE name=?;", (f"diag-{ctx.run_id}",)).fetchone()[0])
+        conn.execute("INSERT INTO expenses (month_id, expense_date, category_id, amount, note, created_by_user_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?);", (month_id, now[:10], category_id, 123.45, "diag", user_id, now, now))
+        expense_id = int(conn.execute("SELECT id FROM expenses WHERE month_id=? ORDER BY id DESC LIMIT 1;", (month_id,)).fetchone()[0])
+        conn.execute("DELETE FROM expenses WHERE id=?;", (expense_id,))
+        conn.commit()
+    return {"status": "success", "message": "Sandbox CRUD checks passed", "details": {"db_path": str(ctx.selected_db_path())}}
+
+
+async def _diag_check_exports(ctx: DiagnosticsContext) -> Dict[str, Any]:
+    with sqlite3.connect(ctx.selected_db_path()) as conn:
+        conn.row_factory = sqlite3.Row
+        month = conn.execute("SELECT id FROM months ORDER BY year DESC, month DESC LIMIT 1;").fetchone()
+    if not month:
+        return {"status": "warn", "message": "No month in DB; export checks skipped", "details": {}}
+    if ctx.mode == "sandbox":
+        return {"status": "success", "message": "Sandbox export precheck passed", "details": {"month_id": int(month["id"])}}
+    png, _, _ = build_month_report_png(int(month["id"]), preset="square", pixel_ratio=1, dpi=96)
+    is_png = png.startswith(b"\x89PNG\r\n\x1a\n") and len(png) > 100
+    if not is_png:
+        return {"status": "fail", "message": "PNG export signature check failed", "details": {"size": len(png)}}
+    return {"status": "success", "message": "Export checks passed", "details": {"png_size": len(png)}}
+
+
+async def _diag_check_backups(ctx: DiagnosticsContext) -> Dict[str, Any]:
+    source_db = ctx.selected_db_path()
+    backup_dir = ctx.sandbox_dir / "backups" if ctx.sandbox_dir else BACKUPS_DIR
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    stamp = dt.datetime.now(CFG.tzinfo()).strftime("%Y%m%d_%H%M%S")
+    db_backup = backup_dir / f"diag_{ctx.run_id}_{stamp}.sqlite3"
+    shutil.copy2(source_db, db_backup)
+    details: Dict[str, Any] = {"db_backup": str(db_backup), "db_size": db_backup.stat().st_size}
+    if ctx.options.backup_full:
+        full_path = backup_dir / f"diag_{ctx.run_id}_{stamp}.zip"
+        with zipfile.ZipFile(full_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.write(source_db, arcname="db.sqlite3")
+        with zipfile.ZipFile(full_path, "r") as zf:
+            details["full_zip_entries"] = zf.namelist()
+        details["full_zip"] = str(full_path)
+    return {"status": "success", "message": "Backup checks passed", "details": details}
+
+
+async def _diag_check_telegram(ctx: DiagnosticsContext) -> Dict[str, Any]:
+    if ctx.mode != "live":
+        return {"status": "skipped", "message": "Telegram checks require LIVE mode", "details": {}}
+    me = await BOT.get_me()
+    details = {"bot_id": me.id, "username": me.username}
+    if ctx.options.telegram_send_test:
+        if not ctx.options.telegram_target_id:
+            return {"status": "warn", "message": "telegram_target_id is required for send test", "details": details}
+        await BOT.send_message(int(ctx.options.telegram_target_id), f"🧪 Diagnostics run #{ctx.run_id} completed")
+        details["sent_to"] = int(ctx.options.telegram_target_id)
+    return {"status": "success", "message": "Telegram checks passed", "details": details}
+
+
+def _build_checks(suite: str) -> List[DiagnosticsCheck]:
+    base = [
+        DiagnosticsCheck("preflight", "Preflight checks", "critical", {"safe", "sandbox", "live"}, _diag_check_preflight),
+        DiagnosticsCheck("db.integrity", "DB integrity", "critical", {"safe", "sandbox", "live"}, _diag_check_db_integrity),
+        DiagnosticsCheck("scheduler.jobs", "Scheduler jobs", "major", {"safe", "sandbox", "live"}, _diag_check_scheduler),
+    ]
+    if suite == "quick":
+        return base
+    if suite == "integrations":
+        return base + [
+            DiagnosticsCheck("telegram.integration", "Telegram integration", "major", {"live"}, _diag_check_telegram),
+            DiagnosticsCheck("backups", "Backup diagnostics", "major", {"safe", "sandbox", "live"}, _diag_check_backups),
+        ]
+    return base + [
+        DiagnosticsCheck("sandbox.crud", "Sandbox CRUD", "critical", {"sandbox", "live"}, _diag_check_sandbox_crud),
+        DiagnosticsCheck("exports", "Export checks", "major", {"safe", "sandbox", "live"}, _diag_check_exports),
+        DiagnosticsCheck("backups", "Backup diagnostics", "major", {"safe", "sandbox", "live"}, _diag_check_backups),
+        DiagnosticsCheck("telegram.integration", "Telegram integration", "major", {"live"}, _diag_check_telegram),
+    ]
+
+
+def _diag_set_run_status(run_id: int, status: str, summary: Dict[str, int], started_at: str) -> None:
+    finished_at = iso_now(CFG.tzinfo())
+    started = dt.datetime.fromisoformat(started_at)
+    finished = dt.datetime.fromisoformat(finished_at)
+    duration_ms = int((finished - started).total_seconds() * 1000)
+    db_exec(
+        """
+        UPDATE diagnostic_runs
+        SET status=?, finished_at=?, duration_ms=?, summary_json=?
+        WHERE id=?;
+        """,
+        (status, finished_at, duration_ms, json.dumps(summary, ensure_ascii=False), int(run_id)),
+    )
+
+
+async def _run_diagnostics(run_id: int, suite: str, mode: str, options: DiagnosticsRunOptions) -> None:
+    started_at = iso_now(CFG.tzinfo())
+    ctx = DiagnosticsContext(run_id, suite, mode, options)
+    checks = _build_checks(suite)
+    final_status = "success"
+    counters = {"success": 0, "warn": 0, "fail": 0, "skipped": 0}
+
+    db_exec("UPDATE diagnostic_runs SET status='running', started_at=? WHERE id=?;", (started_at, int(run_id)))
+    if mode in ("sandbox", "live"):
+        sandbox_dir = Path(tempfile.mkdtemp(prefix=f"diag_{run_id}_"))
+        ctx.sandbox_dir = sandbox_dir
+        ctx.sandbox_db = sandbox_dir / "db.sqlite3"
+        shutil.copy2(CFG.DB_PATH, ctx.sandbox_db)
+
+    try:
+        for chk in checks:
+            if ctx.cancel_event.is_set():
+                final_status = "canceled"
+                break
+            step_started = iso_now(CFG.tzinfo())
+            step_id = db_exec_returning_id(
+                """
+                INSERT INTO diagnostic_steps (run_id, key, title, severity, status, started_at)
+                VALUES (?, ?, ?, ?, 'running', ?);
+                """,
+                (int(run_id), chk.key, chk.title, chk.severity, step_started),
+            )
+            status = "skipped"
+            message = "Skipped"
+            details: Dict[str, Any] = {}
+            trace = None
+            try:
+                if mode not in chk.allowed_modes:
+                    status = "skipped"
+                    message = f"Step is not allowed in {mode} mode"
+                else:
+                    result = await asyncio.wait_for(chk.fn(ctx), timeout=float(options.timeout_sec))
+                    status = str(result.get("status", "success"))
+                    message = str(result.get("message", ""))
+                    details = result.get("details", {}) if isinstance(result.get("details", {}), dict) else {"value": result.get("details")}
+            except Exception as exc:
+                status = "fail"
+                message = str(exc)
+                trace = traceback.format_exc(limit=6)
+                details = {"error": str(exc)}
+
+            step_finished = iso_now(CFG.tzinfo())
+            step_duration = int((dt.datetime.fromisoformat(step_finished) - dt.datetime.fromisoformat(step_started)).total_seconds() * 1000)
+            if trace:
+                details["trace"] = trace
+            db_exec(
+                """
+                UPDATE diagnostic_steps
+                SET status=?, finished_at=?, duration_ms=?, message=?, details_json=?
+                WHERE id=?;
+                """,
+                (status, step_finished, step_duration, message[:1000], json.dumps(details, ensure_ascii=False), int(step_id)),
+            )
+            counters[status] = counters.get(status, 0) + 1
+            if status == "fail":
+                final_status = "fail"
+            elif status == "warn" and final_status != "fail":
+                final_status = "warn"
+    finally:
+        if final_status == "success" and counters.get("warn", 0) > 0:
+            final_status = "warn"
+        _diag_set_run_status(run_id, final_status, counters, started_at)
+        if ctx.sandbox_dir:
+            shutil.rmtree(ctx.sandbox_dir, ignore_errors=True)
+        DIAG_RUNNING_TASKS.pop(run_id, None)
+        DIAG_CANCEL_EVENTS.pop(run_id, None)
+
+
+def _diag_fetch_run(run_id: int) -> Dict[str, Any]:
+    row = db_fetchone("SELECT * FROM diagnostic_runs WHERE id=?;", (int(run_id),))
+    if not row:
+        raise HTTPException(status_code=404, detail="Diagnostics run not found")
+    steps = db_fetchall("SELECT * FROM diagnostic_steps WHERE run_id=? ORDER BY id;", (int(run_id),))
+    out = dict(row)
+    out["options"] = _json_loads(out.pop("options_json", None), {})
+    out["summary"] = _json_loads(out.pop("summary_json", None), {})
+    out["steps"] = []
+    for st in steps:
+        item = dict(st)
+        item["details"] = _json_loads(item.pop("details_json", None), {})
+        out["steps"].append(item)
+    return out
+
+
+@APP.post("/api/admin/diagnostics/run")
+async def api_diagnostics_run(
+    body: DiagnosticsRunIn = Body(default_factory=DiagnosticsRunIn),
+    u: sqlite3.Row = Depends(require_role("admin")),
+):
+    suite = str(body.suite or "quick").lower()
+    mode = str(body.mode or "safe").lower()
+    if suite not in {"quick", "full", "integrations"}:
+        raise HTTPException(status_code=400, detail="Invalid suite")
+    if mode not in {"safe", "sandbox", "live"}:
+        raise HTTPException(status_code=400, detail="Invalid mode")
+    active = db_fetchone("SELECT id FROM diagnostic_runs WHERE status='running' ORDER BY id DESC LIMIT 1;")
+    if active:
+        raise HTTPException(status_code=409, detail="Diagnostics run already in progress")
+
+    now = iso_now(CFG.tzinfo())
+    user_id = int(u["id"])
+    user_exists = db_fetchone("SELECT id FROM users WHERE id=?;", (user_id,))
+    run_id = db_exec_returning_id(
+        """
+        INSERT INTO diagnostic_runs (created_at, created_by_user_id, suite, mode, status, options_json)
+        VALUES (?, ?, ?, ?, 'queued', ?);
+        """,
+        (now, user_id if user_exists else None, suite, mode, json.dumps(body.options.model_dump(), ensure_ascii=False)),
+    )
+    DIAG_CANCEL_EVENTS[run_id] = asyncio.Event()
+    task = asyncio.create_task(_run_diagnostics(run_id, suite, mode, body.options))
+    DIAG_RUNNING_TASKS[run_id] = task
+    return {"run_id": run_id, "status": "running"}
+
+
+@APP.get("/api/admin/diagnostics/runs/{run_id}")
+def api_diagnostics_run_get(run_id: int, u: sqlite3.Row = Depends(require_role("admin"))):
+    return _diag_fetch_run(run_id)
+
+
+@APP.get("/api/admin/diagnostics/runs")
+def api_diagnostics_runs_list(
+    limit: int = Query(50, ge=1, le=500),
+    u: sqlite3.Row = Depends(require_role("admin")),
+):
+    rows = db_fetchall("SELECT * FROM diagnostic_runs ORDER BY id DESC LIMIT ?;", (int(limit),))
+    items = []
+    for row in rows:
+        r = dict(row)
+        r["options"] = _json_loads(r.pop("options_json", None), {})
+        r["summary"] = _json_loads(r.pop("summary_json", None), {})
+        items.append(r)
+    return {"items": items}
+
+
+@APP.post("/api/admin/diagnostics/runs/{run_id}/cancel")
+def api_diagnostics_cancel(run_id: int, u: sqlite3.Row = Depends(require_role("admin"))):
+    row = db_fetchone("SELECT * FROM diagnostic_runs WHERE id=?;", (int(run_id),))
+    if not row:
+        raise HTTPException(status_code=404, detail="Diagnostics run not found")
+    ev = DIAG_CANCEL_EVENTS.get(int(run_id))
+    if ev:
+        ev.set()
+    return {"ok": True}
+
+
+@APP.get("/api/admin/diagnostics/runs/{run_id}/download")
+def api_diagnostics_download(
+    run_id: int,
+    format: str = Query("json"),
+    u: sqlite3.Row = Depends(require_role("admin")),
+):
+    payload = _diag_fetch_run(run_id)
+    fmt = str(format or "json").lower()
+    if fmt == "json":
+        return JSONResponse(payload)
+    if fmt != "html":
+        raise HTTPException(status_code=400, detail="Unsupported format")
+    html = [
+        "<html><head><meta charset='utf-8'><title>Diagnostics report</title></head><body>",
+        f"<h1>Diagnostics run #{payload['id']}</h1>",
+        f"<p>Status: <b>{payload['status']}</b></p>",
+        "<ul>",
+    ]
+    for st in payload.get("steps", []):
+        html.append(f"<li><b>{st.get('status')}</b> {st.get('title')} — {st.get('message') or ''}</li>")
+    html.append("</ul></body></html>")
+    return Response("".join(html), media_type="text/html; charset=utf-8")
+
+
+@APP.post("/api/admin/system/full-test")
+async def api_admin_full_test(u: sqlite3.Row = Depends(require_role("admin"))):
+    options = DiagnosticsRunOptions(timeout_sec=60)
+    ctx = DiagnosticsContext(0, "quick", "safe", options)
+    checks = [
+        ("database", _diag_check_db_integrity),
+        ("settings", _diag_check_preflight),
+        ("scheduler", _diag_check_scheduler),
+        ("core_data", _diag_check_exports),
+        ("storage", _diag_check_backups),
+    ]
+    out = []
+    worst = "ok"
+    for name, fn in checks:
+        res = await fn(ctx)
+        status = str(res.get("status", "success"))
+        if status == "fail":
+            worst = "fail"
+        elif status == "warn" and worst != "fail":
+            worst = "warn"
+        out.append({"name": name, "status": status, "message": res.get("message", "")})
+    return {"status": worst, "checks": out}
 
 
 # ---------------------------
