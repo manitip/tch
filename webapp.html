@@ -3064,45 +3064,6 @@
                   </div>
                 </div>
 
-                <div class="section" id="diagnosticsSection">
-                  <div class="sectionHeader"><h3>Тестирование / Диагностика</h3></div>
-                  <div class="card bigCard">
-                    <div class="form">
-                      <div class="grid2">
-                        <div class="field">
-                          <label>Пакет</label>
-                          <select id="diagSuite" class="input">
-                            <option value="quick">Быстрая диагностика</option>
-                            <option value="full">Полная диагностика (SANDBOX)</option>
-                            <option value="integrations">Интеграции</option>
-                          </select>
-                        </div>
-                        <div class="field">
-                          <label>Режим</label>
-                          <select id="diagMode" class="input">
-                            <option value="safe">SAFE</option>
-                            <option value="sandbox">SANDBOX</option>
-                            <option value="live">LIVE</option>
-                          </select>
-                        </div>
-                      </div>
-                      <label><input id="diagTelegramSend" type="checkbox" /> Проверить отправку в Telegram</label>
-                      <label><input id="diagBackupFull" type="checkbox" /> Проверить full backup</label>
-                      <div class="row" style="gap:10px; flex-wrap:wrap;">
-                        <button id="diagRunBtn" class="btn" type="button"><span class="icon">play_arrow</span> Запустить</button>
-                        <button id="diagCancelBtn" class="btn ghost" type="button"><span class="icon">stop</span> Остановить</button>
-                        <button id="diagDownloadJsonBtn" class="btn small" type="button">JSON</button>
-                        <button id="diagDownloadHtmlBtn" class="btn small" type="button">HTML</button>
-                      </div>
-                      <div id="diagCurrentStatus" class="tiny muted2">Нет активного прогона.</div>
-                      <div id="diagSteps" class="list" style="margin-top:8px;"></div>
-                      <div class="spacer12"></div>
-                      <div class="tiny muted2">История запусков</div>
-                      <div id="diagHistory" class="list" style="margin-top:8px;"></div>
-                    </div>
-                  </div>
-                </div>
-
 
                 <div class="section" id="usersSection">
                   <div class="sectionHeader"><h3>Пользователи</h3></div>
@@ -3693,9 +3654,6 @@
       settingsPage: null,
       settingsScroll: { menu: 0, page: 0 },
       settingsData: null,
-      diagRunId: null,
-      diagPollTimer: null,
-      diagRuns: [],
       settingsLoadPromise: null,
       settingsLoadedAt: 0,
     };
@@ -6773,94 +6731,6 @@
       $("#categoryMergeModal").classList.remove("show");
     }
 
-    async function loadDiagnosticsRuns(){
-      if (State.role !== "admin") return;
-      try{
-        const res = await API.get("/api/admin/diagnostics/runs?limit=30");
-        State.diagRuns = res.items || [];
-      }catch(err){
-        State.diagRuns = [];
-      }
-      renderDiagnosticsHistory();
-    }
-
-    function renderDiagnosticsSteps(steps){
-      const wrap = $("#diagSteps");
-      if (!wrap) return;
-      wrap.innerHTML = "";
-      (steps || []).forEach((step)=>{
-        const row = document.createElement("div");
-        row.className = "card";
-        row.style.padding = "10px";
-        const st = String(step.status || "").toLowerCase();
-        const icon = st === "success" ? "✅" : (st === "warn" ? "⚠️" : (st === "fail" ? "❌" : (st === "running" ? "⏳" : "•")));
-        row.innerHTML = `<div class="bold">${icon} ${escapeHtml(step.title || step.key || "step")}</div><div class="tiny muted2">${escapeHtml(step.message || "")}</div>`;
-        wrap.appendChild(row);
-      });
-    }
-
-    function renderDiagnosticsHistory(){
-      const wrap = $("#diagHistory");
-      if (!wrap) return;
-      wrap.innerHTML = "";
-      (State.diagRuns || []).forEach((run)=>{
-        const row = document.createElement("div");
-        row.className = "card";
-        row.style.padding = "10px";
-        row.innerHTML = `<div class="bold">#${run.id} • ${escapeHtml(run.status || "")}</div><div class="tiny muted2">${escapeHtml(run.created_at || "")}</div>`;
-        row.addEventListener("click", async ()=>{
-          const data = await API.get(`/api/admin/diagnostics/runs/${run.id}`);
-          State.diagRunId = run.id;
-          $("#diagCurrentStatus").textContent = `Run #${run.id}: ${data.status}`;
-          renderDiagnosticsSteps(data.steps || []);
-        });
-        wrap.appendChild(row);
-      });
-    }
-
-    async function pollDiagnosticsRun(){
-      if (!State.diagRunId) return;
-      try{
-        const data = await API.get(`/api/admin/diagnostics/runs/${State.diagRunId}`);
-        $("#diagCurrentStatus").textContent = `Run #${State.diagRunId}: ${data.status}`;
-        renderDiagnosticsSteps(data.steps || []);
-        if (data.status !== "running" && data.status !== "queued"){
-          clearInterval(State.diagPollTimer);
-          State.diagPollTimer = null;
-          await loadDiagnosticsRuns();
-        }
-      }catch(err){
-        clearInterval(State.diagPollTimer);
-        State.diagPollTimer = null;
-      }
-    }
-
-    async function runDiagnostics(){
-      const suite = $("#diagSuite")?.value || "quick";
-      const mode = $("#diagMode")?.value || "safe";
-      const body = {
-        suite,
-        mode,
-        options: {
-          telegram_send_test: !!$("#diagTelegramSend")?.checked,
-          backup_full: !!$("#diagBackupFull")?.checked,
-          timeout_sec: 120
-        }
-      };
-      const res = await API.post("/api/admin/diagnostics/run", body);
-      State.diagRunId = res.run_id;
-      $("#diagCurrentStatus").textContent = `Run #${res.run_id}: running`;
-      clearInterval(State.diagPollTimer);
-      State.diagPollTimer = setInterval(pollDiagnosticsRun, 1500);
-      await pollDiagnosticsRun();
-    }
-
-    async function cancelDiagnostics(){
-      if (!State.diagRunId) return;
-      await API.post(`/api/admin/diagnostics/runs/${State.diagRunId}/cancel`, {});
-      setToast("Остановка запрошена");
-    }
-
     const MonitorDetail = { text: "" };
 
     function monitorIconClass(type, item){
@@ -7547,14 +7417,6 @@
         rolesEditable: ["admin"],
       },
       {
-        id: "diagnosticsSection",
-        title: "Тестирование",
-        subtitle: "Диагностика подсистем",
-        icon: "health_and_safety",
-        rolesVisible: ["admin"],
-        rolesEditable: ["admin"],
-      },
-      {
         id: "monitorSection",
         title: "Мониторинг",
         subtitle: "Ошибки и доставка",
@@ -7731,7 +7593,6 @@
       renderBudgetSettings();
       if (isAdmin){
         await loadBackups();
-        await loadDiagnosticsRuns();
       }
 
       if (isAdmin || isAccountant){
@@ -8613,21 +8474,6 @@
       $("#backupRestoreCloseBtn").addEventListener("click", closeBackupRestoreModal);
       $("#backupRestoreCancelBtn").addEventListener("click", closeBackupRestoreModal);
       $("#backupRestoreConfirmBtn").addEventListener("click", confirmBackupRestore);
-
-      $("#diagRunBtn")?.addEventListener("click", async ()=>{
-        try{ await runDiagnostics(); }catch(e){ alert(String(e.message||e)); }
-      });
-      $("#diagCancelBtn")?.addEventListener("click", async ()=>{
-        try{ await cancelDiagnostics(); }catch(e){ alert(String(e.message||e)); }
-      });
-      $("#diagDownloadJsonBtn")?.addEventListener("click", ()=>{
-        if (!State.diagRunId) return;
-        openDownload(`${API.baseUrl}/api/admin/diagnostics/runs/${State.diagRunId}/download?format=json`);
-      });
-      $("#diagDownloadHtmlBtn")?.addEventListener("click", ()=>{
-        if (!State.diagRunId) return;
-        openDownload(`${API.baseUrl}/api/admin/diagnostics/runs/${State.diagRunId}/download?format=html`);
-      });
     }
 
     /**********************
