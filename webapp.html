@@ -2664,6 +2664,11 @@
                         <label>chat_id (куда отправлять)</label>
                         <input id="setChatId" class="input" type="number" inputmode="numeric" placeholder="Напр. -100123..." />
                       </div>
+                      <div class="field">
+                        <label>Получатели отчётов (из users.json)</label>
+                        <div id="reportRecipients" class="chips" style="gap:8px; flex-wrap:wrap;"></div>
+                        <div class="tiny muted2">Отчёты придут только тем, кто нажал /start боту.</div>
+                      </div>
                       <div class="grid2">
                         <div class="field">
                           <label>Время воскресного отчёта</label>
@@ -2685,6 +2690,12 @@
                         <span class="icon">save</span> Сохранить отчёты
                       </button>
                       <div class="row" style="gap:10px; flex-wrap:wrap;">
+                        <button id="previewSundayBtn" class="btn small ghost" type="button">
+                          <span class="icon">preview</span> Предпросмотр (воскресный)
+                        </button>
+                        <button id="previewExpensesBtn" class="btn small ghost" type="button">
+                          <span class="icon">preview</span> Предпросмотр (расходы)
+                        </button>
                         <button id="sendSundayNowBtn" class="btn small" type="button">
                           <span class="icon">send</span> Воскресный отчёт сейчас
                         </button>
@@ -7544,7 +7555,7 @@
 
       // Admin-only controls
       const adminOnlyIds = [
-        "setChatId","setSundayTime","setDailyTime","setDailyEnabled","saveSettingsBtn","sendSundayNowBtn","sendExpensesNowBtn","sendTestReportBtn",
+        "setChatId","reportRecipients","setSundayTime","setDailyTime","setDailyEnabled","saveSettingsBtn","previewSundayBtn","previewExpensesBtn","sendSundayNowBtn","sendExpensesNowBtn","sendTestReportBtn",
         "setMonthlyMin","setSundaysOverride","setStartBalance","setTimezone","saveMonthSettingsBtn"
       ];
       adminOnlyIds.forEach(id=>{
@@ -7552,7 +7563,7 @@
         if (el) el.closest(".field")?.classList.toggle("hidden", !isAdmin);
       });
       // Admin-only buttons in reports block
-      ["saveSettingsBtn","sendSundayNowBtn","sendExpensesNowBtn","sendTestReportBtn","saveMonthSettingsBtn"].forEach(id=>{
+      ["saveSettingsBtn","previewSundayBtn","previewExpensesBtn","sendSundayNowBtn","sendExpensesNowBtn","sendTestReportBtn","saveMonthSettingsBtn"].forEach(id=>{
         const el = $("#"+id);
         if (el) el.classList.toggle("hidden", !isAdmin);
       });
@@ -7570,6 +7581,7 @@
           $("#setDailyTime").value = (s.month_report_time || "21:00");
           $("#setDailyEnabled").value = s.daily_expenses_enabled ? "1" : "0";
           $("#setTimezone").value = (s.timezone || "Europe/Warsaw");
+          renderReportRecipients(s.report_recipient_options || [], s.report_recipient_ids || []);
         }
         $("#setTheme").value = (s.ui_theme || "auto");
       }
@@ -7612,6 +7624,39 @@
           setMonitorTab(State.monitorTab || "errors");
         }
       }
+    }
+
+    function renderReportRecipients(options, selectedIds){
+      const box = $("#reportRecipients");
+      if (!box) return;
+      const selected = new Set((selectedIds || []).map(Number));
+      box.innerHTML = "";
+      (options || []).forEach((u)=>{
+        const tid = Number(u.telegram_id);
+        const chip = document.createElement("label");
+        chip.className = "chip";
+        chip.style.display = "inline-flex";
+        chip.style.alignItems = "center";
+        chip.style.gap = "6px";
+        chip.innerHTML = `
+          <input type="checkbox" data-report-recipient="${tid}" ${selected.has(tid) ? "checked" : ""} />
+          <span>${escapeHtml(u.name || String(tid))}</span>
+          <span class="tiny muted2">${escapeHtml(u.role || "")}</span>
+        `;
+        box.appendChild(chip);
+      });
+    }
+
+    function getSelectedReportRecipients(){
+      return $$('input[data-report-recipient]:checked').map((el)=> Number(el.getAttribute('data-report-recipient'))).filter(Boolean);
+    }
+
+    async function showReportPreview(kind){
+      const data = await API.get(`/api/reports/preview?kind=${encodeURIComponent(kind)}`);
+      const recipients = (data.recipients || []).join(', ') || '—';
+      alert(`Получатели: ${recipients}
+
+${String(data.text || '')}`);
     }
 
     async function loadThemeSetting(){
@@ -8272,6 +8317,7 @@
         try{
           await API.put("/api/settings", {
             report_chat_id: $("#setChatId").value ? Number($("#setChatId").value) : null,
+            report_recipient_ids: getSelectedReportRecipients(),
             sunday_report_time: $("#setSundayTime").value || null,
             month_report_time: $("#setDailyTime").value || null,
             daily_expenses_enabled: ($("#setDailyEnabled").value === "1")
@@ -8339,6 +8385,13 @@
         }catch(err){
           alert(String(err.message || err));
         }
+      });
+
+      $("#previewSundayBtn").addEventListener("click", async ()=>{
+        try{ await showReportPreview("sunday"); } catch(e){ alert(String(e.message||e)); }
+      });
+      $("#previewExpensesBtn").addEventListener("click", async ()=>{
+        try{ await showReportPreview("month_expenses"); } catch(e){ alert(String(e.message||e)); }
       });
 
       $("#sendSundayNowBtn").addEventListener("click", async ()=>{

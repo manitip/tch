@@ -398,6 +398,7 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS settings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             report_chat_id INTEGER,
+            report_recipient_ids_json TEXT,
             sunday_report_time TEXT NOT NULL DEFAULT '18:00',
             month_report_time TEXT NOT NULL DEFAULT '21:00',
             timezone TEXT NOT NULL DEFAULT 'Europe/Warsaw',
@@ -513,12 +514,15 @@ def init_db() -> None:
         db_exec(
             """
             INSERT INTO settings (
-                report_chat_id, sunday_report_time, month_report_time,
+                report_chat_id, report_recipient_ids_json, sunday_report_time, month_report_time,
                 timezone, ui_theme, daily_expenses_enabled, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
-            (None, "18:00", "21:00", CFG.TZ, "auto", 0, now, now),
+            (None, None, "18:00", "21:00", CFG.TZ, "auto", 0, now, now),
         )
+
+    if not table_has_column("settings", "report_recipient_ids_json"):
+        db_exec("ALTER TABLE settings ADD COLUMN report_recipient_ids_json TEXT;")
 
     if not table_has_column("services", "income_type"):
         db_exec("ALTER TABLE services ADD COLUMN income_type TEXT NOT NULL DEFAULT 'donation';")
@@ -1148,6 +1152,41 @@ def create_cashflow_collect_request_if_needed(
             source_payload=payload,
         )
 
+async def notify_signers_about_cash_request(
+    request_id: int,
+    *,
+    is_retry: bool = False,
+    admin_comment: Optional[str] = None,
+) -> None:
+    import cashflow_models as cf
+    import cashflow_bot as cb
+
+    cfg_base = cf.load_cashflow_config(BASE_DIR)
+    cfg = cf.CashflowConfig(
+        base_dir=cfg_base.base_dir,
+        db_path=Path(CFG.DB_PATH),
+        users_json_path=Path(CFG.USERS_JSON_PATH),
+        uploads_dir=cfg_base.uploads_dir,
+        timezone=cfg_base.timezone,
+    )
+    with db_connect() as conn:
+        cf.init_cashflow_db(conn)
+        view = cf.build_request_view(conn, int(request_id))
+    req = view["request"]
+    signer_ids = [int(p["telegram_id"]) for p in view["participants"] if not p.get("is_admin")]
+    if not signer_ids:
+        return
+    await cb.notify_signers_new_request(
+        request_id=int(request_id),
+        account=str(req["account"]),
+        op_type=str(req["op_type"]),
+        amount=float(req["amount"]),
+        signer_ids=signer_ids,
+        is_retry=is_retry,
+        admin_comment=admin_comment,
+    )
+
+
 def finalize_cashflow_collect_request(request_id: int) -> Optional[int]:
     req = db_fetchone("SELECT * FROM cash_requests WHERE id=?;", (int(request_id),))
     if not req:
@@ -1256,12 +1295,65 @@ def register_bot_subscriber(telegram_id: int) -> None:
         (now, telegram_id),
     )
 
+def parse_report_recipient_ids(raw: Any) -> List[int]:
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    out: List[int] = []
+    for item in data:
+        try:
+            out.append(int(item))
+        except Exception:
+            continue
+    return sorted(set(out))
+
+
+def list_report_recipient_options() -> List[Dict[str, Any]]:
+    allow = refresh_allowlist_if_needed()
+    items: List[Dict[str, Any]] = []
+    for tid, u in sorted(allow.items(), key=lambda x: (str(x[1].get("name") or "").lower(), int(x[0]))):
+        if not bool(u.get("active", True)):
+            continue
+        items.append(
+            {
+                "telegram_id": int(tid),
+                "name": str(u.get("name") or tid),
+                "role": str(u.get("role") or "viewer"),
+                "active": True,
+                "is_signer": str(u.get("role") or "") == "cash_signer",
+            }
+        )
+    return items
+
+
 def list_report_recipients(settings_row: Optional[sqlite3.Row] = None) -> List[int]:
     s = settings_row or get_settings()
     ids: set[int] = set()
     chat_id = s["report_chat_id"]
     if chat_id:
         ids.add(int(chat_id))
+
+    selected = parse_report_recipient_ids(s["report_recipient_ids_json"])
+    if selected:
+        placeholders = ",".join("?" for _ in selected)
+        rows = db_fetchall(
+            f"""
+            SELECT telegram_id
+            FROM bot_subscribers
+            WHERE active=1
+              AND telegram_id IN ({placeholders});
+            """,
+            tuple(selected),
+        )
+        ids.update(int(r["telegram_id"]) for r in rows)
+        return sorted(ids)
+
+    # Backward compatibility: if explicit selection is empty, use all active users from allowlist.
     allow = refresh_allowlist_if_needed()
     allowed_ids = {tid for tid, u in allow.items() if u.get("active") is True}
     if allowed_ids:
@@ -1275,9 +1367,7 @@ def list_report_recipients(settings_row: Optional[sqlite3.Row] = None) -> List[i
             """,
             tuple(allowed_ids),
         )
-    else:
-        rows = []
-    ids.update(int(r["telegram_id"]) for r in rows)
+        ids.update(int(r["telegram_id"]) for r in rows)
     return sorted(ids)
 # ---------------------------
 # Session token (HMAC signed JSON) - self-contained (no external JWT deps)
@@ -2184,6 +2274,7 @@ class MonthBudgetIn(BaseModel):
 
 class SettingsUpdateIn(BaseModel):
     report_chat_id: Optional[int] = None
+    report_recipient_ids: Optional[List[int]] = None
     sunday_report_time: Optional[str] = None  # "HH:MM"
     month_report_time: Optional[str] = None   # "HH:MM"
     timezone: Optional[str] = None
@@ -2735,6 +2826,7 @@ async def on_confirm(cq: CallbackQuery):
                 created_by_telegram_id=int(tid),
             )
             if request_id:
+                await notify_signers_about_cash_request(int(request_id))
                 PENDING.pop(tid, None)
                 await cq.message.answer(
                     f"Создан запрос на подтверждение наличных №{request_id}. "
@@ -2879,14 +2971,21 @@ def build_sunday_report_text(today: dt.date) -> Tuple[str, Optional[InlineKeyboa
     sddr = float(summary["sddr"])
     sddr_text = fmt_money(sddr) if sddr > 0 else "Нет суммы"
 
+    month_income = float(summary["month_income_sum"])
+    month_expenses = float(summary["month_expenses_sum"])
+    fact_balance = float(summary["fact_balance"])
+
     block3 = (
         f"\n\n<b>Месяц на текущую дату</b>\n"
-        f"• Итого доход: <b>{fmt_money(float(summary['month_income_sum']))}</b>\n"
+        f"• Итого доход: <b>{fmt_money(month_income)}</b>\n"
+        f"• Итого расход: <b>{fmt_money(month_expenses)}</b>\n"
         f"• Выполнение МНСП: <b>{fmt_percent_1(float(summary['monthly_completion']))}</b>\n"
-        f"• СДДР: <b>{sddr_text}</b>"
+        f"• СДДР: <b>{sddr_text}</b>\n"
+        f"• Факт. остаток: <b>{fmt_money(fact_balance)}</b>"
     )
 
-    return title + block1 + block2 + block3, None
+    footer = "\n\n<i>В отчёт включены данные по основному счёту, тип дохода: пожертвования.</i>"
+    return title + block1 + block2 + block3 + footer, None
 
 
 def build_month_expenses_report_text(today: dt.date) -> Tuple[str, Optional[InlineKeyboardMarkup]]:
@@ -3739,7 +3838,7 @@ def list_services(
 
 
 @APP.post("/api/months/{month_id}/services")
-def create_service(
+async def create_service(
     month_id: int,
     body: ServiceIn,
     u: sqlite3.Row = Depends(require_role("admin", "accountant")),
@@ -3769,6 +3868,7 @@ def create_service(
             created_by_telegram_id=int(u["telegram_id"]),
         )
         if request_id:
+            await notify_signers_about_cash_request(int(request_id))
             return JSONResponse(
                 status_code=202,
                 content={
@@ -4715,6 +4815,8 @@ def api_get_settings(u: sqlite3.Row = Depends(require_role("admin", "accountant"
     s = get_settings()
     out = dict(s)
     out["daily_expenses_enabled"] = bool(int(out.get("daily_expenses_enabled") or 0))
+    out["report_recipient_ids"] = parse_report_recipient_ids(out.get("report_recipient_ids_json"))
+    out["report_recipient_options"] = list_report_recipient_options()
     return out
 
 
@@ -4727,6 +4829,7 @@ async def api_update_settings(
     if role != "admin":
         non_theme_fields = [
             body.report_chat_id,
+            body.report_recipient_ids,
             body.sunday_report_time,
             body.month_report_time,
             body.timezone,
@@ -4745,6 +4848,11 @@ async def api_update_settings(
             await ensure_report_chat_reachable(report_chat_id)
         fields.append("report_chat_id=?")
         params.append(report_chat_id)
+
+    if body.report_recipient_ids is not None:
+        recipient_ids = sorted({int(x) for x in body.report_recipient_ids})
+        fields.append("report_recipient_ids_json=?")
+        params.append(json.dumps(recipient_ids, ensure_ascii=False))
 
     if body.sunday_report_time is not None:
         fields.append("sunday_report_time=?")
@@ -4866,6 +4974,35 @@ def api_monitor_deliveries(
 # ---------------------------
 # Reports (manual trigger via API)
 # ---------------------------
+
+@APP.get("/api/reports/preview")
+async def api_report_preview(
+    kind: str = Query("sunday"),
+    u: sqlite3.Row = Depends(require_role("admin", "accountant")),
+):
+    s = get_settings()
+    tzinfo = ZoneInfo(str(s["timezone"] or CFG.TZ))
+    today = dt.datetime.now(tzinfo).date()
+
+    if kind == "sunday":
+        text, kb = build_sunday_report_text(today)
+        return {"kind": kind, "text": text, "has_actions": bool(kb), "recipients": list_report_recipients(s)}
+
+    if kind == "month_expenses":
+        text, kb = build_month_expenses_report_text(today)
+        return {"kind": kind, "text": text, "has_actions": bool(kb), "recipients": list_report_recipients(s)}
+
+    if kind == "test":
+        now = dt.datetime.now(tzinfo)
+        text = (
+            "✅ Тестовый отчёт\n"
+            f"Если вы это видите, доставка работает.\n"
+            f"Время: {now:%Y-%m-%d %H:%M:%S %Z}"
+        )
+        return {"kind": kind, "text": text, "has_actions": False, "recipients": list_report_recipients(s)}
+
+    raise HTTPException(status_code=400, detail="Unsupported preview kind")
+
 
 @APP.post("/api/reports/sunday")
 async def api_report_sunday(u: sqlite3.Row = Depends(require_role("admin", "accountant"))):
