@@ -44,9 +44,6 @@
       --safe-bot: env(safe-area-inset-bottom);
 
       --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, Arial, sans-serif;
-
-      /* добавлено для blur-оверлеев (модалки/панели) */
-      --overlay-dim: rgba(0,0,0,.26);
     }
 
     /* Light theme fallback */
@@ -60,7 +57,6 @@
       --stroke: rgba(15,23,42,.12);
       --shadow: 0 10px 24px rgba(15,23,42,.10);
       --ring-track: rgba(15,23,42,.08);
-      --overlay-dim: rgba(15,23,42,.22);
     }
 
     *{ box-sizing: border-box; }
@@ -123,7 +119,6 @@
       border: 1px solid var(--stroke);
       box-shadow: none;
     }
-
     .icon{
       font-family: "Material Symbols Rounded";
       font-weight: 500;
@@ -1194,6 +1189,15 @@
       display:flex;
       flex-direction:column;
       gap: 12px;
+      transition: filter .22s ease, opacity .22s ease, transform .22s ease;
+      transform-origin: center top;
+    }
+    #settingsWrap.panelOpen #settingsMenu{
+      filter: blur(8px);
+      opacity: .55;
+      transform: scale(.985);
+      pointer-events: none;
+      user-select: none;
     }
     .settingsMenuHeader{
       display:flex;
@@ -1236,9 +1240,8 @@
     .settingsPanelBackdrop{
       position: absolute;
       inset: 0;
-      background: var(--overlay-dim);
-      backdrop-filter: blur(18px) saturate(1.2);
-      -webkit-backdrop-filter: blur(18px) saturate(1.2);
+      background: rgba(0,0,0,.6);
+      backdrop-filter: blur(10px);
       opacity: 0;
       transition: opacity .22s ease;
     }
@@ -1382,6 +1385,11 @@
       display:block;
       animation: screenIn .20s ease forwards;
     }
+    #screenSettings.active{
+      animation: none;
+      opacity: 1;
+      transform: none;
+    }
     @keyframes screenIn{
       to { opacity: 1; transform: translateX(0); }
     }
@@ -1438,7 +1446,7 @@
       z-index: 1;
     }
     .dropdown.open{
-      z-index: 5;
+      z-index: 5000;
     }
     .dropdownTrigger{
       width: 100%;
@@ -1474,10 +1482,10 @@
       transform: rotate(180deg);
     }
     .dropdownPanel{
-      position: absolute;
-      top: calc(100% + 6px);
+      position: fixed;
+      top: 0;
       left: 0;
-      right: 0;
+      right: auto;
       background: var(--card);
       border: 1px solid var(--stroke);
       border-radius: 16px;
@@ -1494,14 +1502,13 @@
       overflow: hidden;
       pointer-events: none;
       transition: max-height .24s ease, opacity .18s ease, transform .18s ease;
-      z-index: 200;
+      z-index: 5100;
     }
-    .dropdown.open-up .dropdownPanel{
-      top: auto;
-      bottom: calc(100% + 6px);
+    .dropdownPanel.open-up{
       transform: translateY(6px) scale(.98);
     }
-    .dropdown.open .dropdownPanel{
+    .dropdown.open .dropdownPanel,
+    .dropdownPanel.open{
       max-height: 260px;
       opacity: 1;
       transform: translateY(0) scale(1);
@@ -1510,7 +1517,18 @@
       overscroll-behavior: contain;
       -webkit-overflow-scrolling: touch;
     }
-    .dropdown.open-up.open .dropdownPanel{
+    #histMonthDropdown.open,
+    #histCategoryDropdown.open{
+      z-index: 5000;
+    }
+    #histMonthDropdown .dropdownPanel,
+    #histCategoryDropdown .dropdownPanel,
+    #yearDropdown .dropdownPanel,
+    #monthDropdown .dropdownPanel{
+      z-index: 5100;
+    }
+    .dropdown.open-up.open .dropdownPanel,
+    .dropdownPanel.open-up.open{
       transform: translateY(0) scale(1);
     }
     .dropdownOption{
@@ -1571,38 +1589,86 @@
       color: rgba(16,185,129,.95);
     }
 
-    .cashflowActTable{
-      width: 100%;
-      border-collapse: collapse;
-      table-layout: fixed;
-      min-width: 520px;
-      font-size: 13px;
+    .sigCell{
+      display:flex;
+      flex-direction:column;
+      gap: 6px;
+      align-items:flex-start;
     }
-    .cashflowActTable th,
-    .cashflowActTable td{
-      padding: 10px 8px;
-      border-bottom: 1px solid var(--stroke);
-      text-align: left;
-      vertical-align: top;
+    .cashflowActList{
+      display:flex;
+      flex-direction:column;
+      gap: 12px;
     }
-    .cashflowActTable th{
-      color: var(--muted);
+    .actCard{
+      background: var(--card);
+      border: 1px solid var(--stroke);
+      border-radius: 16px;
+      padding: 12px;
+      box-shadow: var(--shadow);
+      display:flex;
+      flex-direction:column;
+      gap: 8px;
+    }
+    .actHeader{
+      display:flex;
+      justify-content:space-between;
+      gap: 12px;
+      align-items:flex-start;
+    }
+    .actTitle{
+      display:flex;
+      flex-direction:column;
+      gap: 4px;
+      min-width: 0;
+    }
+    .actTitle .actOp{
+      font-weight: 700;
+      font-size: 14px;
+      color: var(--text);
+    }
+    .actTitle .actMeta{
+      display:flex;
+      flex-wrap:wrap;
+      gap: 6px;
+      color: var(--muted2);
+      font-size: 12px;
+    }
+    .actAmount{
+      font-size: 16px;
       font-weight: 700;
       white-space: nowrap;
     }
-    .cashflowActTable td{
-      color: var(--text);
-      white-space: nowrap;
+    .actPerson{
+      display:flex;
+      flex-direction:column;
+      gap: 2px;
     }
-    .cashflowActTable td:nth-child(3),
-    .cashflowActTable td:nth-child(4),
-    .cashflowActTable td:nth-child(5){
-      white-space: normal;
-      word-break: break-word;
+    .actPerson .name{
+      font-weight: 600;
     }
-    .cashflowActTable th:nth-child(2),
-    .cashflowActTable td:nth-child(2){
-      text-align: right;
+    .actPerson .role{
+      font-size: 12px;
+      color: var(--muted2);
+    }
+    .actSignature{
+      display:flex;
+      flex-wrap:wrap;
+      align-items:center;
+      gap: 8px;
+    }
+    .sigImage{
+      width: 120px;
+      height: 36px;
+      object-fit: contain;
+      border-radius: 10px;
+      padding: 4px 6px;
+      background: var(--card2);
+      border: 1px solid var(--stroke);
+    }
+    .sigMeta{
+      font-size: 11px;
+      color: var(--muted2);
     }
 
 
@@ -1729,9 +1795,7 @@
     .modalBackdrop{
       position: fixed;
       inset: 0;
-      background: var(--overlay-dim);
-      backdrop-filter: blur(18px) saturate(1.2);
-      -webkit-backdrop-filter: blur(18px) saturate(1.2);
+      background: rgba(0,0,0,.45);
       display:none;
       align-items:flex-end;
       justify-content:center;
@@ -1802,77 +1866,6 @@
     .toastCard.show{
       opacity: 1;
       transform: translateY(0);
-    }
-
-    .authGate{
-      position: fixed;
-      inset: 0;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 24px;
-      background: linear-gradient(180deg, rgba(11,15,20,.88), rgba(11,15,20,.94));
-      backdrop-filter: blur(12px);
-      z-index: 999;
-    }
-    .authGate.hidden{ display: none; }
-    .authGateCard{
-      width: 100%;
-      max-width: 420px;
-      background: var(--card);
-      border: 1px solid var(--stroke);
-      border-radius: 20px;
-      padding: 22px;
-      box-shadow: var(--shadow);
-    }
-    .authGateTitle{
-      font-size: 18px;
-      font-weight: 700;
-      margin-bottom: 6px;
-    }
-    .authGateMessage{
-      font-size: 14px;
-      color: var(--muted);
-      line-height: 1.4;
-      margin: 0 0 16px;
-    }
-    .authGateError{
-      color: var(--danger);
-    }
-    .authGateActions{
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-    }
-    .authGateBtn{
-      flex: 1 1 140px;
-      border-radius: 14px;
-      border: 1px solid var(--stroke);
-      background: var(--card2);
-      color: var(--text);
-      padding: 10px 12px;
-      font-size: 14px;
-      cursor: pointer;
-    }
-    .authGateBtn.primary{
-      background: linear-gradient(135deg, rgba(16,185,129,.95), rgba(52,211,153,.95));
-      border: none;
-      color: #04130d;
-      font-weight: 650;
-    }
-    .authGateSwitch{
-      display: flex;
-      justify-content: center;
-      margin-top: 10px;
-    }
-    .authGateLink{
-      border: none;
-      background: transparent;
-      color: var(--muted);
-      font-size: 12px;
-      cursor: pointer;
-      text-decoration: underline;
-      -webkit-tap-highlight-color: transparent;
     }
     .check{
       width: 22px; height: 22px;
@@ -1974,106 +1967,6 @@
       .ring{ width: 90px; height: 90px; }
       .ringInner{ width: 70px; height: 70px; }
     }
-    /* --- FIX: фон всегда на весь экран --- */
-    html, body{
-      min-height: 100svh;
-      background: var(--bg) !important;
-    }
-    body::before{
-      content:"";
-      position: fixed;
-      inset: 0;
-      background: var(--bg);
-      z-index: -10;
-    }
-
-    /* --- Cashflow Act table: без нахлестов --- */
-    .cashflowActTable{
-      width: 100%;
-    }
-    .cashflowActTable th,
-    .cashflowActTable td{
-      white-space: normal;
-      overflow-wrap: anywhere;
-      word-break: break-word;
-      vertical-align: top;
-    }
-
-    /* PNG подпись */
-    .sigImg{
-      width: 160px;
-      max-width: 100%;
-      height: 52px;
-      object-fit: contain;
-      background: #fff;
-      border-radius: 12px;
-      border: 1px solid var(--stroke);
-      display: block;
-    }
-
-    /* бейджи для статусов подписи */
-    .badge.danger{
-      background: rgba(239,68,68,.12);
-      border: 1px solid rgba(239,68,68,.25);
-      color: rgba(239,68,68,.95);
-    }
-
-    /* На телефоне превращаем строки таблицы в "карточки" */
-    /* На телефоне превращаем строки таблицы в "карточки" */
-    @media (max-width: 520px){
-      .cashflowActTable thead{ display:none; }
-
-      /* ВАЖНО: убираем min-width, иначе значения уходят за экран */
-      .cashflowActTable{
-        min-width: 0 !important;
-        width: 100% !important;
-        table-layout: auto !important;
-        border-collapse: separate;
-        border-spacing: 0 10px;
-      }
-
-      .cashflowActTable tr{
-        display:block;
-        width: 100%;
-        background: var(--card);
-        border: 1px solid var(--stroke);
-        border-radius: 16px;
-        padding: 10px 12px;
-      }
-
-      .cashflowActTable td{
-        display:flex;
-        align-items:flex-start;
-        justify-content:space-between;
-        gap: 12px;
-        border: 0 !important;
-        padding: 6px 0 !important;
-        width: 100%;
-      }
-
-      .cashflowActTable td::before{
-        content: attr(data-label);
-        flex: 0 0 44%;
-        color: var(--muted2);
-        font-size: 11px;
-        line-height: 1.2;
-      }
-
-      .cashflowActTable td .cfVal{
-        flex: 1;
-        text-align: right;
-        color: var(--text);
-        min-width: 0;
-        overflow-wrap: anywhere;
-      }
-
-      .cashflowActTable td .cfVal img,
-      .cashflowActTable td .cfVal .badge{
-        margin-left: auto;
-      }
-    }
-
-
   </style>
 </head>
 
@@ -2082,15 +1975,6 @@
     <div id="toastCard" class="toastCard">
       <div class="check"></div>
       <div class="small bold">Сохранено</div>
-    </div>
-  </div>
-
-  <div id="authGate" class="authGate" role="dialog" aria-live="polite" aria-modal="true">
-    <div class="authGateCard">
-      <div id="authGateTitle" class="authGateTitle">Требуется Telegram</div>
-      <p id="authGateMessage" class="authGateMessage">
-        Откройте приложение через Telegram, чтобы пройти авторизацию по Telegram ID.
-      </p>
     </div>
   </div>
 
@@ -2104,10 +1988,6 @@
         </button>
       </div>
       <div class="row" style="gap:10px;">
-
-        <button id="refreshBtn" class="btnIcon" type="button" aria-label="Обновить">
-          <span class="icon">refresh</span>
-        </button>
         <span id="roleBadge" class="badge">роль: —</span>
       </div>
     </div>
@@ -2991,6 +2871,9 @@
                       <button id="exportXlsxBtn" class="btn" type="button">
                         <span class="icon">download</span> Скачать Excel (год)
                       </button>
+                      <button id="exportPngBtn" class="btn" type="button">
+                        <span class="icon">download</span> Скачать PNG (месяц)
+                      </button>
                     </div>
                     <div class="tiny muted2" style="margin-top:8px;">Откроется в браузере Telegram (скачивание зависит от клиента).</div>
                   </div>
@@ -3126,24 +3009,8 @@
                         </button>
                       </div>
                       <div class="spacer12"></div>
-                      <div style="overflow:auto;">
-                        <table class="cashflowActTable">
-                          <thead>
-                            <tr>
-                              <th>Дата</th>
-                              <th>Операция</th>
-                              <th>Сумма</th>
-                              <th>ФИО</th>
-                              <th>Тип пользователя</th>
-                              <th>Подпись</th>
-                            </tr>
-                          </thead>
-                          <tbody id="cashflowActBody">
-                            <tr><td colspan="6" class="muted2">Нет данных.</td></tr>
-                          </tbody>
-                        </table>
-
-                      </div>
+                      <div id="cashflowActList" class="cashflowActList"></div>
+                      <div id="cashflowActEmpty" class="tiny muted2">Нет данных.</div>
                     </div>
                   </div>
                 </div>
@@ -3201,12 +3068,7 @@
                 <div class="section" id="usersSection">
                   <div class="sectionHeader"><h3>Пользователи</h3></div>
                   <div class="card bigCard">
-                    <div class="tiny muted2">
-                      Управление доступом выполняется через файл <code>users.json</code>
-                      (по Telegram ID). После изменения файла откройте приложение заново.
-                    </div>
-                    <div class="spacer12"></div>
-                    <div id="usersList" class="list"></div>
+                    <div class="tiny muted2">Управление пользователями — через users.json (MVP). UI-редактор можно добавить позже.</div>
                   </div>
                 </div>
               </div>
@@ -3308,11 +3170,25 @@
           <div class="grid2">
             <div class="field">
               <label>Год</label>
-              <select id="yearSelect" class="input"></select>
+              <div id="yearDropdown" class="dropdown">
+                <button type="button" class="dropdownTrigger" aria-haspopup="listbox" aria-expanded="false">
+                  <span class="dropdownValue">—</span>
+                  <span class="icon">expand_more</span>
+                </button>
+                <div class="dropdownPanel" role="listbox"></div>
+              </div>
+              <select id="yearSelect" class="input hiddenSelect" tabindex="-1" aria-hidden="true"></select>
             </div>
             <div class="field">
               <label>Месяц</label>
-              <select id="monthSelect" class="input"></select>
+              <div id="monthDropdown" class="dropdown">
+                <button type="button" class="dropdownTrigger" aria-haspopup="listbox" aria-expanded="false">
+                  <span class="dropdownValue">—</span>
+                  <span class="icon">expand_more</span>
+                </button>
+                <div class="dropdownPanel" role="listbox"></div>
+              </div>
+              <select id="monthSelect" class="input hiddenSelect" tabindex="-1" aria-hidden="true"></select>
             </div>
           </div>
           <button id="applyMonthBtn" class="btn primary" type="button">
@@ -3527,16 +3403,14 @@
     /**********************
      * Telegram init + theme
      **********************/
-    function getTelegramWebApp(){
-      return window.Telegram?.WebApp || null;
-    }
+    const tg = window.Telegram?.WebApp;
     const ThemeState = {
       mode: "auto",
       media: window.matchMedia?.("(prefers-color-scheme: dark)")
     };
 
     function detectTelegramTheme(){
-      const p = getTelegramWebApp()?.themeParams || {};
+      const p = tg?.themeParams || {};
       if (!p.bg_color) return null;
       const hex = p.bg_color.replace("#","");
       if (hex.length !== 6) return null;
@@ -3547,7 +3421,7 @@
       return (lum > 180) ? "light" : "dark";
     }
 
-    const tgThemeParams = getTelegramWebApp()?.themeParams || {};
+    const tgThemeParams = tg?.themeParams || {};
 
     function applyTelegramThemeVars(theme){
       const root = document.documentElement.style;
@@ -3584,10 +3458,9 @@
       applyTelegramThemeVars(theme);
     }
 
-    const tgApp = getTelegramWebApp();
-    if (tgApp) {
-      tgApp.ready();
-      tgApp.expand();
+    if (tg) {
+      tg.ready();
+      tg.expand();
     }
 
     ThemeState.media?.addEventListener?.("change", ()=>{
@@ -3607,100 +3480,20 @@
     /**********************
      * API layer
      **********************/
-
-    function getRawQueryParam(raw, key){
-      if (!raw) return "";
-      const trimmed = raw.replace(/^[?#]/, "");
-      if (!trimmed) return "";
-      const needle = `${encodeURIComponent(key)}=`;
-      const start = trimmed.indexOf(needle);
-      if (start === -1) return "";
-      const valueStart = start + needle.length;
-      const end = trimmed.indexOf("&", valueStart);
-      return end === -1 ? trimmed.slice(valueStart) : trimmed.slice(valueStart, end);
-    }
-
-    function consumeMagicTokenFromUrl(){
-      try{
-        const url = new URL(window.location.href);
-        const token = url.searchParams.get("token") || "";
-        if (token){
-          url.searchParams.delete("token");
-          history.replaceState({}, document.title, url.toString());
-        }
-        return token;
-      }catch{
-        return "";
-      }
-    }
-
-    function getInitDataFromUrl(){
-      try{
-        const fromSearch = getRawQueryParam(location.search || "", "tgWebAppData");
-        if (fromSearch) return fromSearch;
-               const fromHash = getRawQueryParam(location.hash || "", "tgWebAppData");
-        return fromHash || ""; const hash = (location.hash || "").replace(/^#/, "");
-        if (!hash) return "";
-        const hashParams = new URLSearchParams(hash);
-        return hashParams.get("tgWebAppData") || "";
-      }catch{
-        return "";
-      }
-    }
-
-    function getTelegramInitData(){
-      const liveTg = getTelegramWebApp();
-      return liveTg?.initData || getInitDataFromUrl();
-    }
-
-    function getTelegramUserId(){
-      const directId = getTelegramWebApp()?.initDataUnsafe?.user?.id;
-      if (directId) return Number(directId);
-      const initData = getInitDataFromUrl();
-      if (!initData) return null;
-      try{
-        const params = new URLSearchParams(initData);
-        const userRaw = params.get("user");
-        if (!userRaw) return null;
-        let parsed = null;
-        try{
-          parsed = JSON.parse(userRaw);
-        }catch{
-          parsed = JSON.parse(decodeURIComponent(userRaw));
-        }
-        if (parsed && parsed.id) return Number(parsed.id);
-      }catch{
-        return null;
-      }
-      return null;
-    }
-
-
-
     const API = {
       token: null,
       user: null,
-      baseUrl: (() => {
-        const params = new URLSearchParams(location.search);
-        const apiParam = params.get("api");
-        if (apiParam && apiParam.trim()){
-          try{
-            const parsed = new URL(apiParam, location.origin);
-            if (location.protocol === "https:" && parsed.protocol === "http:"){
-              return location.origin;
-            }
-            return (parsed.origin + parsed.pathname).replace(/\/$/, "");
-          }catch{
-            return apiParam.replace(/\/$/, "");
-          }
-        }
-        return location.origin;
-      })(), // same host unless overridden
-      async authTelegram(initData){
+      baseUrl: location.origin, // same host
+      getTelegramInitData(){
+        return tg?.initData || "";
+      },
+      async auth(){
+        const initData = API.getTelegramInitData();
+        if (!initData) throw new Error("Нет initData. Откройте через Telegram.");
         const res = await fetch(`${API.baseUrl}/api/auth/telegram`,{
           method:"POST",
           headers: {"Content-Type":"application/json"},
-          body: JSON.stringify({ initData })
+          body: JSON.stringify({initData})
         });
         if (!res.ok) {
           const t = await res.text().catch(()=> "");
@@ -3713,48 +3506,32 @@
         localStorage.setItem("sessionUser", JSON.stringify(API.user));
         return data;
       },
-
-      async authMagic(loginToken){
-        const res = await fetch(`${API.baseUrl}/api/auth/magic/exchange`,{
-          method:"POST",
-          headers: {"Authorization": `Bearer ${loginToken}`}
-        });
-        if (!res.ok) {
-          const t = await res.text().catch(()=> "");
-          throw new Error(`${res.status}: ${t || "Unauthorized"}`);
-        }
-        const data = await res.json();
-        API.token = data.token;
-        API.user = data.user;
-        localStorage.setItem("sessionToken", API.token);
-        localStorage.setItem("sessionUser", JSON.stringify(API.user));
-        return data;
-      },
-
       async ensureAuth(){
-        const telegramUserId = getTelegramUserId();
-        const initData = getTelegramInitData();
-        if (!initData && !API.token) {
-          throw new Error("Telegram initData is missing");
+        if (!API.token) {
+          API.token = localStorage.getItem("sessionToken");
+          try { API.user = JSON.parse(localStorage.getItem("sessionUser")||"null"); } catch { API.user=null; }
         }
-        if (telegramUserId && API.user?.telegram_id && Number(API.user.telegram_id) !== telegramUserId) {
-          API.token = null;
-          API.user = null;
-          localStorage.removeItem("sessionToken");
-          localStorage.removeItem("sessionUser");
-          throw new Error("Аккаунт Telegram изменился. Войдите или зарегистрируйтесь заново.");
+        const initData = API.getTelegramInitData();
+        const isTelegramContext = !!tg;
+        if (isTelegramContext){
+          if (!initData){
+            API.token = null;
+            API.user = null;
+            localStorage.removeItem("sessionToken");
+            localStorage.removeItem("sessionUser");
+            throw new Error("Нет initData от Telegram. Закройте и откройте приложение из Telegram заново.");
+          }
+          // В Telegram всегда перевыпускаем сессию из initData,
+          // чтобы токен из localStorage от другого аккаунта не подменял пользователя.
+          return API.auth();
         }
-
-        const me = await API.get("/api/me");
-        if (telegramUserId && Number(me?.telegram_id) !== telegramUserId) {
-          API.token = null;
-          API.user = null;
-          localStorage.removeItem("sessionToken");
-          localStorage.removeItem("sessionUser");
-          throw new Error("Аккаунт Telegram изменился. Войдите или зарегистрируйтесь заново.");
+        if (!API.token) return API.auth();
+        // cheap /api/me check
+        try{
+          await API.get("/api/me");
+        }catch(e){
+          return API.auth();
         }
-        API.user = me;
-        return me;
       },
       async get(path){
         return API.req(path, {method:"GET"});
@@ -3763,7 +3540,6 @@
         const headers = {};
         if (API.token) headers["Authorization"] = `Bearer ${API.token}`;
         const res = await fetch(`${API.baseUrl}${path}`, { method: "GET", headers });
-
         if (res.status === 401 || res.status === 403) {
           const txt = await res.text().catch(()=> "");
           throw new Error(`${res.status}: ${txt || "Unauthorized"}`);
@@ -3787,7 +3563,6 @@
         const headers = Object.assign({"Content-Type":"application/json"}, opts.headers||{});
         if (API.token) headers["Authorization"] = `Bearer ${API.token}`;
         const res = await fetch(`${API.baseUrl}${path}`, { ...opts, headers });
-
         if (res.status === 401 || res.status === 403) {
           // bubble for caller to reauth UI if needed
           const txt = await res.text().catch(()=> "");
@@ -3802,20 +3577,6 @@
         return res.text();
       }
     };
-
-    function loadStoredSession(){
-      const storedToken = localStorage.getItem("sessionToken");
-      if (storedToken) API.token = storedToken;
-      const storedUser = localStorage.getItem("sessionUser");
-      if (storedUser) {
-        try{
-          API.user = JSON.parse(storedUser);
-        }catch{
-          API.user = null;
-        }
-      }
-    }
-
 
     function parseApiError(err){
       const msg = err?.message ? String(err.message) : String(err || "");
@@ -3832,29 +3593,6 @@
         // ignore json parse errors
       }
       return { status, detail };
-    }
-
-
-    const AuthGateState = {
-      mode: "login",
-    };
-
-    function showAuthGate(message, title){
-      const gate = $("#authGate");
-      if (!gate) return;
-      const titleEl = $("#authGateTitle");
-      if (titleEl && title) titleEl.textContent = title;
-      const msgEl = $("#authGateMessage");
-      if (msgEl && message) msgEl.textContent = message;
-      gate.classList.remove("hidden");
-
-    }
-
-    function hideAuthGate(){
-      const gate = $("#authGate");
-      if (!gate) return;
-      gate.classList.add("hidden");
-
     }
 
 
@@ -3904,7 +3642,6 @@
       expenseTags: [],
       historyTags: [],
       historyTagMode: "any",
-      users: [],
       monitorTab: "errors",
       monitorOverview: null,
       monitorTab: "errors",
@@ -3916,7 +3653,35 @@
       backupBusy: false,
       settingsPage: null,
       settingsScroll: { menu: 0, page: 0 },
+      settingsData: null,
+      settingsLoadPromise: null,
+      settingsLoadedAt: 0,
     };
+
+    const SETTINGS_CACHE_TTL_MS = 60_000;
+    const prefersReducedMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    function settingsScrollBehavior(){
+      return prefersReducedMotion ? "auto" : "smooth";
+    }
+
+    async function ensureSettingsData({force=false}={}){
+      const canUseCache = !force && State.settingsData && (Date.now() - State.settingsLoadedAt < SETTINGS_CACHE_TTL_MS);
+      if (canUseCache) return State.settingsData;
+      if (!force && State.settingsLoadPromise) return State.settingsLoadPromise;
+
+      State.settingsLoadPromise = API.get("/api/settings")
+        .then((data)=>{
+          State.settingsData = data;
+          State.settingsLoadedAt = Date.now();
+          return data;
+        })
+        .finally(()=>{
+          State.settingsLoadPromise = null;
+        });
+
+      return State.settingsLoadPromise;
+    }
 
     /**********************
      * Attachments
@@ -4698,15 +4463,6 @@
         categoriesPromise = loadCategories();
       }
       refreshSundayDates();
-      if (!State.monthId) {
-        const recovered = await loadLatestMonthFallback().catch(()=> false);
-        if (recovered) {
-          State.periodYear = State.year;
-          State.periodMonth = State.month;
-          State.periodQuarter = quarterFromMonth(State.month);
-          rebuildPeriodSelectors();
-        }
-      }
       if (!State.monthId) {
         // clear UI
         renderEmptyMonth();
@@ -5859,6 +5615,10 @@
         });
       };
       buildOptions();
+      if (!panel.dataset.portalMounted) {
+        panel.dataset.portalMounted = "true";
+        document.body.appendChild(panel);
+      }
 
       const sync = ()=>{
         buildOptions();
@@ -5881,23 +5641,31 @@
         const spaceBelow = window.innerHeight - rect.bottom - 8;
         const spaceAbove = rect.top - 8;
         const openUp = spaceBelow < panelHeight && spaceAbove > spaceBelow;
+
         dropdown.classList.toggle("open-up", openUp);
+        panel.classList.toggle("open-up", openUp);
+
         const available = openUp ? spaceAbove : spaceBelow;
-        if (available > 0) {
-          panel.style.maxHeight = `${Math.min(panelHeight, available)}px`;
-        } else {
-          panel.style.maxHeight = `${panelHeight}px`;
-        }
+        const nextHeight = available > 0 ? Math.min(panelHeight, available) : panelHeight;
+        panel.style.maxHeight = `${nextHeight}px`;
+        panel.style.width = `${rect.width}px`;
+        panel.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - rect.width - 8))}px`;
+        panel.style.right = "auto";
+        panel.style.top = openUp ? "auto" : `${rect.bottom + 6}px`;
+        panel.style.bottom = openUp ? `${window.innerHeight - rect.top + 6}px` : "auto";
       };
 
       const open = ()=>{
         positionPanel();
         dropdown.classList.add("open");
+        panel.classList.add("open");
         trigger.setAttribute("aria-expanded", "true");
       };
       const close = ()=>{
         dropdown.classList.remove("open");
         dropdown.classList.remove("open-up");
+        panel.classList.remove("open");
+        panel.classList.remove("open-up");
         panel.style.maxHeight = "";
         trigger.setAttribute("aria-expanded", "false");
       };
@@ -5920,8 +5688,11 @@
         close();
       });
       document.addEventListener("click", (e)=>{
-        if (!dropdown.contains(e.target)) close();
+        if (!dropdown.contains(e.target) && !panel.contains(e.target)) close();
       });
+      document.addEventListener("scroll", ()=>{
+        if (dropdown.classList.contains("open")) positionPanel();
+      }, true);
       document.addEventListener("keydown", (e)=>{
         if (e.key === "Escape") close();
       });
@@ -7162,6 +6933,7 @@
      **********************/
     const CashflowState = {
       currentId: null,
+      signatureUrls: [],
     };
 
     function fmtCashflowAccount(code){
@@ -7185,7 +6957,7 @@
       }[st] || st;
     }
 
-    function createSignaturePad(){
+    function createSignaturePad(onChange){
       const wrap = document.createElement("div");
       const canvas = document.createElement("canvas");
       canvas.className = "sigPad";
@@ -7201,7 +6973,11 @@
       let last = null;
       let moved = false;
       let hasInk = false;
-      let readyListener = null;
+      const setInk = (val)=>{
+        if (hasInk === val) return;
+        hasInk = val;
+        if (typeof onChange === "function") onChange(hasInk);
+      };
       const resize = ()=>{
         const rect = canvas.getBoundingClientRect();
         const dpr = window.devicePixelRatio || 1;
@@ -7210,12 +6986,7 @@
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         ctx.lineWidth = 2.2;
         ctx.lineCap = "round";
-        ctx.strokeStyle = "#0000ff";
-      };
-      const setReady = (ready)=>{
-        if (hasInk === ready) return;
-        hasInk = ready;
-        if (readyListener) readyListener(ready);
+        ctx.strokeStyle = (document.documentElement.dataset.theme === "dark") ? "#e8eefc" : "#111";
       };
       const pos = (e)=>{
         const rect = canvas.getBoundingClientRect();
@@ -7235,7 +7006,7 @@
         ctx.stroke();
         last = p;
         moved = true;
-        setReady(true);
+        setInk(true);
       };
       const end = ()=>{
         if (drawing && !moved && last){
@@ -7243,7 +7014,7 @@
           ctx.moveTo(last.x, last.y);
           ctx.lineTo(last.x + 0.1, last.y + 0.1);
           ctx.stroke();
-          setReady(true);
+          setInk(true);
         }
         drawing = false;
         last = null;
@@ -7255,20 +7026,16 @@
       canvas.addEventListener("pointercancel", end);
       btn.addEventListener("click", ()=>{
         ctx.clearRect(0, 0, canvas.width, canvas.height);
-        moved = false;
-        setReady(false);
+        setInk(false);
       });
       window.addEventListener("resize", resize);
       setTimeout(resize, 0);
+      setInk(false);
 
       return {
         wrap,
         dataUrl: ()=> canvas.toDataURL("image/png"),
         hasInk: ()=> hasInk,
-        onReadyChange: (cb)=>{
-          readyListener = cb;
-          if (readyListener) readyListener(hasInk);
-        },
       };
     }
 
@@ -7384,9 +7151,7 @@
       if (canAdminSign) {
         const signBlock = document.createElement("div");
         signBlock.className = "form";
-        const pad = createSignaturePad();
         signBlock.innerHTML = `<div class="divider"></div><div class="bold" style="margin-bottom:6px;">Подпись</div>`;
-        signBlock.appendChild(pad.wrap);
         const btn = document.createElement("button");
         btn.className = "btn ok";
         btn.type = "button";
@@ -7394,13 +7159,14 @@
         btn.style.marginTop = "8px";
         btn.disabled = true;
         btn.setAttribute("aria-disabled", "true");
-        pad.onReadyChange((ready)=>{
+        const pad = createSignaturePad((ready)=>{
           btn.disabled = !ready;
           btn.setAttribute("aria-disabled", ready ? "false" : "true");
         });
+        signBlock.appendChild(pad.wrap);
         btn.addEventListener("click", async ()=>{
           if (!pad.hasInk()){
-            setToast("Нарисуйте подпись перед отправкой");
+            setToast("Нарисуйте подпись перед отправкой.");
             return;
           }
           await API.post(`/api/cashflow/requests/${r.id}/sign`, { signature: pad.dataUrl() });
@@ -7430,108 +7196,99 @@
       const account = $("#cashflowActAccount")?.value || "main";
       const q = new URLSearchParams();
       if (account) q.set("account", account);
-
       const data = await API.get(`/api/cashflow/withdraw-act?${q.toString()}`);
-      const body = $("#cashflowActBody");
-      if (!body) return;
-
+      const list = $("#cashflowActList");
+      const empty = $("#cashflowActEmpty");
+      if (!list || !empty) return;
       const items = data.items || [];
-      body.innerHTML = "";
-
+      list.innerHTML = "";
+      CashflowState.signatureUrls?.forEach((url)=> URL.revokeObjectURL(url));
+      CashflowState.signatureUrls = [];
+      empty.classList.toggle("hidden", items.length > 0);
+      const makeBadge = (text, tone)=>{
+        const span = document.createElement("span");
+        span.className = `badge${tone ? ` ${tone}` : ""}`;
+        span.textContent = text;
+        return span;
+      };
       if (!items.length){
-        body.innerHTML = `<tr><td colspan="6" class="muted2">Нет данных.</td></tr>`;
         return;
       }
+      for (const r of items){
+        const sigValue = r.signature_value || "";
+        const sigIsRefuse = sigValue.startsWith("ОТКАЗ");
+        const hasImage = !!r.signature_path;
+        const date = r.date || r.created_at || "";
+        const fio = r.fio || r.name_snapshot || "";
+        const userType = r.user_type || r.role_snapshot || "";
+        const op = fmtCashflowOp(r.op_type || "");
+        const amountText = `${Number(r.amount || 0).toFixed(2)}`;
+        const signatureCard = document.createElement("div");
+        signatureCard.className = "actSignature";
+        const appendBadge = (badge)=>{
+          signatureCard.appendChild(badge);
+        };
 
-      items.forEach((r)=>{
-        const tr = document.createElement("tr");
-
-        const tdDate = document.createElement("td");
-        tdDate.dataset.label = "Дата";
-        tdDate.textContent = fmtDateOnly(r.date || r.created_at || "");
-        tr.appendChild(tdDate);
-
-        const tdOp = document.createElement("td");
-        tdOp.dataset.label = "Операция";
-        tdOp.textContent = fmtCashflowOp(r.op_type || "");
-        tr.appendChild(tdOp);
-
-        const tdAmt = document.createElement("td");
-        tdAmt.dataset.label = "Сумма";
-        const amt = Number(r.amount || 0);
-        tdAmt.textContent = amt.toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-        tdAmt.classList.add("mono");
-        tr.appendChild(tdAmt);
-
-        const tdFio = document.createElement("td");
-        tdFio.dataset.label = "ФИО";
-        tdFio.textContent = r.fio || r.name_snapshot || "";
-        tr.appendChild(tdFio);
-
-        const tdType = document.createElement("td");
-        tdType.dataset.label = "Тип пользователя";
-        tdType.textContent = r.user_type || r.role_snapshot || "";
-        tr.appendChild(tdType);
-
-        const tdSig = document.createElement("td");
-        tdSig.dataset.label = "Подпись";
-        const sigVal = String(r.signature_value || "");
-
-        if (sigVal.startsWith("ОТКАЗ")){
-          tdSig.appendChild(makeBadge(sigVal, "danger"));
-        } else if (r.signature_path && r.request_id && r.participant_telegram_id){
+        if (sigIsRefuse){
+          appendBadge(makeBadge(sigValue, "bad"));
+        } else if (hasImage){
           const img = document.createElement("img");
-          img.className = "sigImg";
+          img.className = "sigImage";
           img.alt = "Подпись";
-          tdSig.appendChild(img);
-
-          ensureSignatureImg(img, r.request_id, r.participant_telegram_id).catch(()=>{
-            tdSig.innerHTML = "";
-            tdSig.appendChild(makeBadge(sigVal || "Подписано"));
-          });
+          img.loading = "lazy";
+          signatureCard.appendChild(img);
+          appendBadge(makeBadge("Подписано", "ok"));
+          try{
+            const blob = await API.getBlob(`/api/cashflow/requests/${r.request_id}/participants/${r.participant_telegram_id}/signature.png`);
+            const url = URL.createObjectURL(blob);
+            CashflowState.signatureUrls.push(url);
+            img.src = url;
+          }catch{
+            appendBadge(makeBadge("Подпись не найдена", "warn"));
+          }
+        } else if (sigValue){
+          const text = sigValue === "SIGNED" ? "Подписано" : sigValue;
+          appendBadge(makeBadge(text, sigValue === "SIGNED" ? "ok" : "warn"));
         } else {
-          tdSig.appendChild(makeBadge(sigVal || "Ожидает подписи"));
+          appendBadge(makeBadge("Ожидает подписи", "warn"));
         }
 
-        tr.appendChild(tdSig);
-        body.appendChild(tr);
-      });
-    }
+        if (list) {
+          const card = document.createElement("div");
+          card.className = "actCard";
 
+          const header = document.createElement("div");
+          header.className = "actHeader";
 
-    // --- подписи: кэш objectURL, чтобы не дёргать сеть повторно ---
-    const CASH_SIG_CACHE = new Map(); // key -> objectURL
+          const title = document.createElement("div");
+          title.className = "actTitle";
+          title.innerHTML = `
+            <div class="actOp">${escapeHtml(op)}</div>
+            <div class="actMeta">
+              <span>${escapeHtml(date)}</span>
+            </div>
+          `;
 
-    function fmtDateOnly(v){
-      if (!v) return "—";
-      const s = String(v);
-      try{
-        const d = new Date(s);
-        if (!Number.isNaN(d.getTime())){
-          return d.toLocaleDateString("ru-RU", { year:"numeric", month:"2-digit", day:"2-digit" });
+          const amount = document.createElement("div");
+          amount.className = "actAmount";
+          amount.textContent = amountText;
+
+          header.appendChild(title);
+          header.appendChild(amount);
+          card.appendChild(header);
+
+          const person = document.createElement("div");
+          person.className = "actPerson";
+          person.innerHTML = `
+            <div class="name">${escapeHtml(fio || "—")}</div>
+            <div class="role">${escapeHtml(userType || "—")}</div>
+          `;
+          card.appendChild(person);
+
+          card.appendChild(signatureCard);
+          list.appendChild(card);
         }
-      }catch(e){}
-      return s.split("T")[0];
-    }
-
-    function makeBadge(text, variant){
-      const span = document.createElement("span");
-      span.className = variant ? `badge ${variant}` : "badge";
-      span.textContent = text || "—";
-      return span;
-    }
-
-    // Нужен метод API.getBlob (см. ниже)
-    async function ensureSignatureImg(imgEl, requestId, participantTelegramId){
-      const key = `${requestId}:${participantTelegramId}`;
-      if (CASH_SIG_CACHE.has(key)){
-        imgEl.src = CASH_SIG_CACHE.get(key);
-        return;
       }
-      const blob = await API.getBlob(`/api/cashflow/requests/${requestId}/participants/${participantTelegramId}/signature.png`);
-      const url = URL.createObjectURL(blob);
-      CASH_SIG_CACHE.set(key, url);
-      imgEl.src = url;
     }
 
 
@@ -7569,51 +7326,6 @@
       $("#tabMonDeliveries").classList.toggle("active", which === "deliveries");
       loadMonitorList(which);
     }
-
-    function renderUsersList(){
-      const list = $("#usersList");
-      if (!list) return;
-      const items = State.users || [];
-      if (!items.length){
-        list.innerHTML = `<div class="card bigCard"><div class="tiny muted2">Пользователей пока нет.</div></div>`;
-        return;
-      }
-      list.innerHTML = items.map((u)=>{
-        const name = escapeHtml(u.name || u.login || "—");
-        const team = escapeHtml(u.team || "—");
-        const role = escapeHtml(u.role || "—");
-        const login = escapeHtml(u.login || "—");
-        const telegramId = escapeHtml(String(u.telegram_id || "—"));
-        const active = u.active ? "Активен" : "Отключён";
-                <div class="tiny muted2">Telegram ID: ${telegramId}</div>
-                <div class="tiny muted2">Логин: ${login} • Тим: ${team}</div>
-              </div>
-              <div class="chip">${role}</div>
-              <div class="tiny muted2">${active}</div>
-            </div>
-          </div>
-        `;
-      }).join("");
-    }
-
-
-    async function loadUsers(){
-      if (State.role !== "admin") return;
-      try{
-        const res = await API.get("/api/admin/users");
-        State.users = res.items || [];
-        renderUsersList();
-      }catch(e){
-        State.users = [];
-        const list = $("#usersList");
-        if (list){
-          list.innerHTML = `<div class="card bigCard"><div class="tiny muted2">Не удалось загрузить список пользователей.</div></div>`;
-        }
-      }
-    }
-
-
-
 
     const SettingsMenuConfig = [
       {
@@ -7667,7 +7379,7 @@
       {
         id: "usersSection",
         title: "Пользователи",
-        subtitle: "Доступ через users.json",
+        subtitle: "Доступ и роли",
         icon: "group",
         rolesVisible: ["admin"],
         rolesEditable: ["admin"],
@@ -7751,7 +7463,12 @@
       const panel = $("#settingsPanel");
       const title = $("#settingsPanelTitle");
       const body = $("#settingsPanelBody");
+      const content = panel ? panel.querySelector(".settingsPanelContent") : null;
       if (!panel || !title || !body) return;
+      const resetPanelScroll = ()=>{
+        scrollToTopExact(body);
+        if (content) scrollToTopExact(content);
+      };
       title.textContent = config.title;
       $$("#settingsSectionsHost .section").forEach((sec)=>{
         sec.classList.add("hidden");
@@ -7764,8 +7481,12 @@
       }
       panel.classList.remove("hidden");
       panel.setAttribute("aria-hidden", "false");
-      body.scrollTop = State.settingsScroll.page || 0;
+      $("#settingsWrap")?.classList.add("panelOpen");
+      body.scrollTop = 0;
       requestAnimationFrame(()=> panel.classList.add("open"));
+      window.scrollTo({top: 0, left: 0, behavior: settingsScrollBehavior()});
+      resetPanelScroll();
+      if (active) active.scrollIntoView({block: "start", inline: "nearest", behavior: settingsScrollBehavior()});
       if (sectionId === "cashflowSection"){
         setCashflowTab("requests");
         loadCashflowRequests().catch(()=> {});
@@ -7786,12 +7507,13 @@
       const finish = ()=>{
         panel.classList.add("hidden");
         panel.setAttribute("aria-hidden", "true");
+        $("#settingsWrap")?.classList.remove("panelOpen");
         $$("#settingsSectionsHost .section").forEach((sec)=>{
           sec.classList.add("hidden");
           sec.classList.remove("activePage");
         });
         State.settingsPage = null;
-        window.scrollTo({top: State.settingsScroll.menu || 0});
+        window.scrollTo({top: State.settingsScroll.menu || 0, left: 0, behavior: settingsScrollBehavior()});
       };
       if (immediate){
         panel.classList.remove("open");
@@ -7841,7 +7563,7 @@
 
       // Load server settings for admin/viewer
       if (isAdmin || isViewer){
-        const s = await API.get("/api/settings");
+        const s = await ensureSettingsData();
         if (isAdmin) {
           $("#setChatId").value = (s.report_chat_id ?? "");
           $("#setSundayTime").value = (s.sunday_report_time || "18:00");
@@ -7871,8 +7593,6 @@
       renderBudgetSettings();
       if (isAdmin){
         await loadBackups();
-        await loadUsers();
-        await loadRegistrationRequests();
       }
 
       if (isAdmin || isAccountant){
@@ -7895,7 +7615,7 @@
     }
 
     async function loadThemeSetting(){
-      const s = await API.get("/api/settings");
+      const s = await ensureSettingsData();
       applyTheme(s.ui_theme || "auto");
       const themeSelect = $("#setTheme");
       if (themeSelect) themeSelect.value = (s.ui_theme || "auto");
@@ -8054,11 +7774,8 @@
       }
 
       setToast("Сохранено");
+      resetExpenseForm();
       await refreshAll();
-
-      if (andMore){
-        resetExpenseForm();
-      }
     }
 
     /**********************
@@ -8071,9 +7788,8 @@
         if (!u.searchParams.has("token")) u.searchParams.set("token", token);
         return u.toString();
       })() : url;
-      const tgApp = getTelegramWebApp();
-      if (tgApp?.openLink){
-        tgApp.openLink(finalUrl);
+      if (tg?.openLink){
+        tg.openLink(finalUrl);
       } else {
         window.open(finalUrl, "_blank");
       }
@@ -8107,6 +7823,8 @@
       }
       ySel.value = String(State.year);
       mSel.value = String(State.month);
+      syncDropdown("yearSelect");
+      syncDropdown("monthSelect");
 
       $("#monthModal").classList.add("show");
     }
@@ -8193,6 +7911,62 @@
       });
     }
 
+    function wirePullToRefresh(){
+      const minPullDistance = 90;
+      const maxHorizontalDrift = 64;
+      let touchStartY = 0;
+      let touchStartX = 0;
+      let isTracking = false;
+      let isRefreshing = false;
+
+      const onRefresh = async ()=>{
+        if (isRefreshing) return;
+        isRefreshing = true;
+        try{
+          await refreshAll();
+          setToast("Обновлено");
+        }catch(e){
+          alert(String(e.message || e));
+        }finally{
+          isRefreshing = false;
+        }
+      };
+
+      window.addEventListener("touchstart", (e)=>{
+        if (e.touches.length !== 1 || window.scrollY > 0) {
+          isTracking = false;
+          return;
+        }
+        const touch = e.touches[0];
+        touchStartY = touch.clientY;
+        touchStartX = touch.clientX;
+        isTracking = true;
+      }, { passive: true });
+
+      window.addEventListener("touchmove", (e)=>{
+        if (!isTracking || e.touches.length !== 1) return;
+        const touch = e.touches[0];
+        const deltaY = touch.clientY - touchStartY;
+        const deltaX = Math.abs(touch.clientX - touchStartX);
+        if (deltaY <= 0) {
+          isTracking = false;
+          return;
+        }
+        if (deltaX > maxHorizontalDrift) {
+          isTracking = false;
+          return;
+        }
+        if (deltaY >= minPullDistance) {
+          isTracking = false;
+          onRefresh();
+        }
+      }, { passive: true });
+
+      window.addEventListener("touchend", ()=>{
+        isTracking = false;
+      }, { passive: true });
+    }
+
     async function applyPeriodSelection(){
       const yearSelect = $("#periodYearSelect");
       const monthSelect = $("#periodMonthSelect");
@@ -8236,8 +8010,6 @@
      * Event wiring
      **********************/
     function wireEvents(){
-
-
       // nav
       $$(".navBtn").forEach(btn=>{
         btn.addEventListener("click", ()=>{
@@ -8252,12 +8024,6 @@
       });
 
       // topbar
-      $("#refreshBtn").addEventListener("click", async ()=>{
-        try{
-          await refreshAll();
-          setToast("Обновлено");
-        }catch(e){ alert(String(e.message||e)); }
-      });
       $("#monthBtn").addEventListener("click", openMonthModal);
 
       // month modal
@@ -8538,13 +8304,6 @@
           alert(String(err.message || err));
         }
       });
-      $("#addCategoryBtn").addEventListener("click", ()=>{
-        if (!(State.role === "admin" || State.role === "accountant")){
-          setToast("Нет доступа");
-          return;
-        }
-        openCategoryNameModal();
-      });
       $("#closeCategoryNameModal").addEventListener("click", closeCategoryNameModal);
       $("#closeCategoryMergeModal").addEventListener("click", closeCategoryMergeModal);
       $("#categoryNameModal").addEventListener("click", (e)=>{ if (e.target === $("#categoryNameModal")) closeCategoryNameModal(); });
@@ -8680,6 +8439,10 @@
       $("#exportXlsxBtn").addEventListener("click", ()=>{
         openDownload(`${API.baseUrl}/api/export/excel?year=${encodeURIComponent(State.year)}`);
       });
+      $("#exportPngBtn").addEventListener("click", ()=>{
+        if (!State.monthId){ alert("Месяц не выбран/не создан."); return; }
+        openDownload(`${API.baseUrl}/api/export/png?month_id=${encodeURIComponent(State.monthId)}&preset=landscape`);
+      });
 
       $("#backupDbBtn").addEventListener("click", async ()=>{
         await runBackup("db");
@@ -8718,11 +8481,9 @@
      **********************/
     async function boot(){
       applyTheme("auto");
-      loadStoredSession();
       // load templates early
       loadTemplates();
       rebuildTemplateSelect();
-      showAuthGate("Проверяем доступ...", "Авторизация");
 
       // init dates
       const t = todayYMD();
@@ -8736,6 +8497,7 @@
       State.otherIncomeDate = `${t.y}-${String(t.m).padStart(2,"0")}-${String(t.d).padStart(2,"0")}`;
 
       wireEvents();
+      wirePullToRefresh();
       initDropdownFromSelect("donIncomeType", "donIncomeTypeDropdown");
       initDropdownFromSelect("donAccount", "donAccountDropdown");
       initDropdownFromSelect("expAccount", "expAccountDropdown");
@@ -8745,6 +8507,8 @@
       initDropdownFromSelect("histCategorySelect", "histCategoryDropdown");
       initDropdownFromSelect("periodYearSelect", "periodYearDropdown");
       initDropdownFromSelect("periodMonthSelect", "periodMonthDropdown");
+      initDropdownFromSelect("yearSelect", "yearDropdown");
+      initDropdownFromSelect("monthSelect", "monthDropdown");
       initDropdownFromSelect("cashflowCreateAccount", "cashflowCreateAccountDropdown");
       initDropdownFromSelect("cashflowFilterAccount", "cashflowFilterAccountDropdown");
       initDropdownFromSelect("cashflowFilterStatus", "cashflowFilterStatusDropdown");
@@ -8755,39 +8519,10 @@
       // Hide settings tab label for viewer (still present but gated)
       // We'll keep it visible but will block opening.
 
-
       try{
-        const magicToken = consumeMagicTokenFromUrl();
-        if (magicToken){
-          showAuthGate("Входим по ссылке...", "Авторизация");
-          await API.authMagic(magicToken);
-        }
-      }
-        const initData = getTelegramInitData();
-        if (!initData && !API.token){
-          throw new Error("Telegram initData is missing");
-        }
-        if (initData && !API.token){
-          await API.authTelegram(initData);
-        }
-
         await API.ensureAuth();
-        hideAuthGate();
       }catch(e){
-        const parsed = parseApiError(e);
-        const raw = parsed.detail || String(e?.message || "Авторизация не удалась.");
-        if (parsed.status === 401){
-          showAuthGate("Ссылка истекла или недействительна.", "Авторизация");
-        } else if (parsed.status === 403){
-          showAuthGate("Недостаточно прав для доступа.", "Авторизация");
-        } else if (/initData/i.test(raw)){
-          showAuthGate(
-            "Откройте приложение через Telegram или используйте ссылку входа из бота.",
-            "Требуется авторизация"
-          );
-        } else {
-          showAuthGate(raw, "Нет доступа");
-        }
+        alert("Авторизация не удалась: " + String(e.message||e));
         return;
       }
 
@@ -8796,20 +8531,14 @@
         window.location.replace(`${API.baseUrl}/cashapp`);
         return;
       }
-      const displayName = (API.user?.name || API.user?.login || "").trim();
+      const displayName = (API.user?.name || "").trim();
       $("#roleBadge").textContent = `роль: ${displayName || State.role}`;
       applyRoleUI();
 
       const themePromise = loadThemeSetting().catch(()=> applyTheme("auto"));
       await loadMonthsForYear(State.year);
-      const hasMonth = await ensureSelectedMonthExists();
-      if (!hasMonth) {
-        await loadLatestMonthFallback();
-      }
+      await ensureSelectedMonthExists();
       setMonthTitle();
-      State.periodYear = State.year;
-      State.periodMonth = State.month;
-      State.periodQuarter = quarterFromMonth(State.month);
       rebuildPeriodSelectors();
 
       // prefill expense date + totals
@@ -8821,9 +8550,6 @@
       // build month selection lists for modal
       await refreshAll({ deferAnalytics: true, deferLookups: true });
       await themePromise;
-
-      // initial render settings UI (lazy)
-      runIdle(()=> renderSettingsUI());
 
       const initialScreen = new URLSearchParams(window.location.search).get("screen");
       if (["dashboard","add","history","settings"].includes(initialScreen)){

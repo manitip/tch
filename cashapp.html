@@ -22,7 +22,7 @@
       --muted:rgba(255,255,255,.65);
       --muted2:rgba(255,255,255,.45);
       --line:rgba(255,255,255,.10);
-      --shadow: 0 18px 40px rgba(0,0,0,.40);
+      --shadow: 0 10px 30px rgba(0,0,0,.30);
       --primary:#10b981;
       --primary2:#34d399;
       --danger:#fb7185;
@@ -42,22 +42,22 @@
       --bg:#f4f6fa;
       --card:#ffffff;
       --card2:#eef2f7;
-      --text:#0f172a;
+      --text:#111827;
       --muted:#4b5563;
       --muted2:#6b7280;
-      --line:rgba(15,23,42,.10);
+      --line:rgba(15,23,42,.12);
       --shadow: 0 10px 24px rgba(15,23,42,.10);
       --primary:#10b981;
-      --primary2:#15b981;
+      --primary2:#34d399;
       --danger:#ef4444;
       --warn:#f59e0b;
 
-      --overlay: rgba(255,255,255,.60);
-      --overlay2: rgba(15,23,42,.22);
+      --overlay: rgba(244,246,250,.72);
+      --overlay2: rgba(15,23,42,.20);
 
       --tap: rgba(15,23,42,.06);
-      --signature-bg: #f8fafc;
-      --signature-stroke: #0000ff;
+      --signature-bg: #ffffff;
+      --signature-stroke: #0f172a;
     }
 
     .material-symbols-rounded{
@@ -71,9 +71,7 @@
     body{
       margin:0;
       font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, "Apple Color Emoji","Segoe UI Emoji";
-      background: radial-gradient(900px 600px at 20% -10%, rgba(16,185,129,.18), transparent 60%),
-                  radial-gradient(900px 600px at 90% 0%, rgba(52,211,153,.16), transparent 62%),
-                  var(--bg);
+      background: var(--bg);
       color:var(--text);
     }
     .wrap{
@@ -155,6 +153,31 @@
     }
     .iconBtn:active{ transform: scale(.98); background: var(--tap); }
 
+    .themePill{
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: var(--card2);
+      color: var(--text);
+      font-weight: 800;
+      font-size: 12px;
+      letter-spacing: .2px;
+      cursor:pointer;
+      user-select:none;
+      -webkit-tap-highlight-color: transparent;
+      box-shadow: var(--shadow);
+      transition: transform .12s ease, background .12s ease, color .12s ease;
+    }
+    .themePill.active{
+      background: var(--primary);
+      color: #fff;
+      border-color: transparent;
+    }
+    .themePill:active{ transform: scale(.98); background: var(--tap); }
+
     .card{
       background: var(--card);
       border: 1px solid var(--line);
@@ -187,7 +210,7 @@
       color: var(--text);
       background: rgba(16,185,129,.16);
       border: 1px solid rgba(16,185,129,.25);
-      box-shadow: 0 10px 18px rgba(16,185,129,.12);
+      box-shadow: none;
     }
 
     .row{
@@ -287,9 +310,9 @@
       white-space:nowrap;
     }
     .btnPrimary{
-      background: linear-gradient(180deg, var(--primary), var(--primary2));
+      background: var(--primary);
       color:#fff;
-      box-shadow: 0 14px 26px rgba(21,185,129,.25);
+      box-shadow: none;
     }
     .btnGhost{
       background: var(--card);
@@ -520,13 +543,13 @@
         </div>
       </div>
       <div class="actions">
+        <button id="lightThemeBtn" class="themePill" type="button" title="Светлая тема">
+          <span class="material-symbols-rounded">light_mode</span>
+          Светлая
+        </button>
         <button id="themeBtn" class="iconBtn" type="button" title="Тема">
           <span class="material-symbols-rounded" id="themeIcon">dark_mode</span>
         </button>
-        <button id="refreshBtn" class="iconBtn" type="button" title="Обновить">
-          <span class="material-symbols-rounded">refresh</span>
-        </button>
-
       </div>
     </div>
 
@@ -711,6 +734,13 @@
       const ic = document.getElementById("themeIcon");
       if (ic) ic.textContent = (theme === "dark") ? "dark_mode" : "light_mode";
 
+      const lightBtn = document.getElementById("lightThemeBtn");
+      if (lightBtn){
+        const isLightMode = ThemeState.mode === "light";
+        lightBtn.classList.toggle("active", isLightMode);
+        lightBtn.setAttribute("aria-pressed", isLightMode ? "true" : "false");
+      }
+
       updateSignatureStyle();
     }
 
@@ -886,6 +916,11 @@
       if (!btn) return;
       btn.disabled = !ready;
       btn.setAttribute("aria-disabled", ready ? "false" : "true");
+    }
+
+    function syncSignatureReady(){
+      if (!Pad) return;
+      updateSignatureReady(!!(Pad.hasInk && Pad.moved));
     }
 
 
@@ -1180,8 +1215,8 @@
       markInk(){
         if (!this.hasInk){
           this.hasInk = true;
-          updateSignatureReady(true);
         }
+        syncSignatureReady();
       }
     };
 
@@ -1311,7 +1346,7 @@
     async function signCurrent(){
       const id = State.currentId;
       if (!id) return;
-      if (!Pad.hasInk){
+      if (!Pad.hasInk || !Pad.moved){
         toast("Нарисуйте подпись перед отправкой");
         return;
       }
@@ -1367,6 +1402,7 @@
 
     async function ensureAuth(){
       const initData = getTelegramInitData();
+      const isTelegramContext = !!getTelegramWebApp();
 
       try{
         setStatus("Авторизация…");
@@ -1374,12 +1410,27 @@
         if (magicToken){
           await API.authMagic(magicToken);
         }
-        if (!initData && !API.token){
+
+        if (isTelegramContext){
+          if (!initData){
+            API.clearToken();
+            toggleAuthCard(true, "Нет initData от Telegram. Закройте и откройте приложение из Telegram заново.");
+            setStatus("Нет данных авторизации", "error");
+            return false;
+          }
+          // В Telegram всегда переавторизуемся по initData, чтобы не использовать
+          // токен от другого Telegram-аккаунта из localStorage.
+          const res = await API.post("/api/auth/telegram", { initData });
+          if (res?.token) API.setToken(res.token);
+          if (res?.user) applyUser(res.user);
+        } else if (!initData && !API.token){
           toggleAuthCard(true, "Откройте приложение через Telegram или используйте ссылку входа.");
           setStatus("Нет данных авторизации", "error");
           return false;
         }
-        if (initData && !API.token){
+        if (initData){
+          // Всегда переавторизуемся по initData, чтобы не использовать токен
+          // от другого Telegram-аккаунта из localStorage.
           const res = await API.post("/api/auth/telegram", { initData });
           if (res?.token) API.setToken(res.token);
           if (res?.user) applyUser(res.user);
@@ -1396,6 +1447,55 @@
 
     }
 
+    function wirePullToRefresh(){
+      const minPullDistance = 90;
+      const maxHorizontalDrift = 64;
+      let touchStartY = 0;
+      let touchStartX = 0;
+      let isTracking = false;
+      let isRefreshing = false;
+
+      const onRefresh = ()=>{
+        if (isRefreshing) return;
+        isRefreshing = true;
+        ensureAuth()
+          .then((ok)=> ok ? loadList() : Promise.resolve())
+          .then(()=> toast("Обновлено"))
+          .catch((e)=> toast(String(e.message || e)))
+          .finally(()=>{ isRefreshing = false; });
+      };
+
+      window.addEventListener("touchstart", (e)=>{
+        if (e.touches.length !== 1 || window.scrollY > 0) {
+          isTracking = false;
+          return;
+        }
+        const touch = e.touches[0];
+        touchStartY = touch.clientY;
+        touchStartX = touch.clientX;
+        isTracking = true;
+      }, { passive: true });
+
+      window.addEventListener("touchmove", (e)=>{
+        if (!isTracking || e.touches.length !== 1) return;
+        const touch = e.touches[0];
+        const deltaY = touch.clientY - touchStartY;
+        const deltaX = Math.abs(touch.clientX - touchStartX);
+        if (deltaY <= 0 || deltaX > maxHorizontalDrift) {
+          isTracking = false;
+          return;
+        }
+        if (deltaY >= minPullDistance) {
+          isTracking = false;
+          onRefresh();
+        }
+      }, { passive: true });
+
+      window.addEventListener("touchend", ()=>{
+        isTracking = false;
+      }, { passive: true });
+    }
+
 
     // bind
     $("tabRequests").addEventListener("click", ()=> setTab("requests"));
@@ -1408,23 +1508,18 @@
     $("sigSend").addEventListener("click", ()=> signCurrent().catch(e=> toast(String(e.message||e))));
     $("refuseBtn").addEventListener("click", ()=> refuseCurrent().catch(e=> toast(String(e.message||e))));
 
-    $("refreshBtn").addEventListener("click", ()=>{
-      ensureAuth()
-        .then((ok)=> ok ? loadList() : Promise.resolve())
-        .then(()=> toast("Обновлено"))
-        .catch(e=> toast(String(e.message||e)));
-    });
-
-
-
     $("themeBtn").addEventListener("click", ()=>{
       const curTheme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
       applyTheme(curTheme === "dark" ? "light" : "dark");
+    });
+    $("lightThemeBtn").addEventListener("click", ()=>{
+      applyTheme("light");
     });
 
     (async function init(){
       initTheme();
       Pad.init();
+      wirePullToRefresh();
       loadStoredToken();
 
       State.dropdowns.account = makeDropdown("accountSel", "accountLabel");

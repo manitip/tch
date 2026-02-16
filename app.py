@@ -1,6 +1,6 @@
 # app.py
 # FastAPI API + планировщик отчётов + aiogram bot (единое приложение)
-# По ТЗ: SQLite, allowlist (users.json), роли, magic-link auth, расчёты как Excel.
+# По ТЗ: SQLite, allowlist (users.json), роли, Telegram WebApp auth (initData), расчёты как Excel.
 
 from __future__ import annotations
 
@@ -10,7 +10,10 @@ import dataclasses
 import datetime as dt
 import hashlib
 import hmac
+import importlib.util
+import io
 import json
+import math
 import os
 import re
 import secrets
@@ -51,11 +54,12 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import (
     Message,
     CallbackQuery,
+    BufferedInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
     WebAppInfo,
+    MenuButtonDefault,
+    MenuButtonWebApp,
 )
 
 # Optional for Excel export
@@ -82,6 +86,7 @@ ALLOWED_ATTACHMENT_MIME_TYPES = {
 }
 MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 MAX_ATTACHMENTS_PER_EXPENSE = 10
+MAX_BACKUP_UPLOAD_BYTES = 200 * 1024 * 1024
 ACCOUNTS = ("main", "praise", "alpha")
 
 # ---------------------------
@@ -96,8 +101,6 @@ class Config:
     DB_PATH: str
     USERS_JSON_PATH: str
     SESSION_SECRET: str
-    MAGIC_LINK_SECRET: str
-    MAGIC_LINK_TTL: int
     TZ: str
 
     def tzinfo(self) -> ZoneInfo:
@@ -128,8 +131,6 @@ def load_config() -> Config:
         DB_PATH=db_path,
         USERS_JSON_PATH=users_json_path,
         SESSION_SECRET=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)).strip(),
-        MAGIC_LINK_SECRET=os.getenv("MAGIC_LINK_SECRET", os.getenv("SESSION_SECRET", "")).strip(),
-        MAGIC_LINK_TTL=int(os.getenv("MAGIC_LINK_TTL", "120").strip() or "120"),
         TZ=os.getenv("TIMEZONE", "Europe/Warsaw").strip(),
     )
 
@@ -147,69 +148,16 @@ def require_https_webapp_url(url: str) -> Optional[str]:
         return None
     return url
 
-
-def require_https_app_url(url: str) -> Optional[str]:
-    if not url:
-        return None
-    try:
-        parsed = urllib.parse.urlparse(url)
-    except Exception:
-        return None
-    if parsed.scheme.lower() != "https":
-        return None
-    return url
-
-
 def cashapp_webapp_url() -> Optional[str]:
     primary = require_https_webapp_url(f"{CFG.APP_URL.rstrip('/')}/cashapp")
     if primary:
-        cashapp_url = primary
-    else:
-        webapp_url = require_https_webapp_url(CFG.WEBAPP_URL)
-        if not webapp_url:
-            return None
-        parsed = urllib.parse.urlparse(webapp_url)
-        cashapp_url = urllib.parse.urlunparse(
-            parsed._replace(path="/cashapp", params="", query="", fragment="")
-        )
-    try:
-        parsed_cashapp = urllib.parse.urlparse(cashapp_url)
-        query = urllib.parse.parse_qs(parsed_cashapp.query)
-        api_url = require_https_app_url(CFG.APP_URL)
-        if api_url:
-            query["api"] = [api_url]
-        new_query = urllib.parse.urlencode(query, doseq=True)
-        return urllib.parse.urlunparse(parsed_cashapp._replace(query=new_query))
-    except Exception:
-        api_url = require_https_app_url(CFG.APP_URL)
-        if api_url:
-            sep = "&" if "?" in cashapp_url else "?"
-            return f"{cashapp_url}{sep}api={urllib.parse.quote(api_url)}"
-        return cashapp_url
-
-def build_webapp_url(screen: Optional[str] = None) -> Optional[str]:
-    url = require_https_webapp_url(CFG.WEBAPP_URL)
-    if not url:
+        return primary
+    webapp_url = require_https_webapp_url(CFG.WEBAPP_URL)
+    if not webapp_url:
         return None
-    try:
-        parsed = urllib.parse.urlparse(url)
-        query = urllib.parse.parse_qs(parsed.query)
-        if screen:
-            query["screen"] = [screen]
-        api_url = require_https_app_url(CFG.APP_URL)
-        if api_url:
-            query["api"] = [api_url]
-        new_query = urllib.parse.urlencode(query, doseq=True)
-        return urllib.parse.urlunparse(parsed._replace(query=new_query))
-    except Exception:
-        sep = "&" if "?" in url else "?"
-        extra: List[str] = []
-        if screen:
-            extra.append(f"screen={urllib.parse.quote(screen)}")
-        api_url = require_https_app_url(CFG.APP_URL)
-        if api_url:
-            extra.append(f"api={urllib.parse.quote(api_url)}")
-        return f"{url}{sep}{'&'.join(extra)}" if extra else url
+    parsed = urllib.parse.urlparse(webapp_url)
+    cashapp_url = parsed._replace(path="/cashapp", params="", query="", fragment="")
+    return urllib.parse.urlunparse(cashapp_url)
 
 
 
@@ -265,77 +213,6 @@ def services_unique_has_account() -> bool:
         if cols == ["month_id", "service_date", "account", "income_type"]:
             return True
     return False
-def hash_password(raw_password: str) -> str:
-    import base64
-    salt = secrets.token_bytes(16)
-    dk = hashlib.pbkdf2_hmac("sha256", raw_password.encode("utf-8"), salt, 120_000)
-    return f"pbkdf2_sha256${base64.b64encode(salt).decode()}${base64.b64encode(dk).decode()}"
-
-
-def verify_password(raw_password: str, stored_hash: str) -> bool:
-    import base64
-    try:
-        algo, salt_b64, hash_b64 = stored_hash.split("$", 2)
-    except ValueError:
-        return False
-    if algo != "pbkdf2_sha256":
-        return False
-    try:
-        salt = base64.b64decode(salt_b64)
-        expected = base64.b64decode(hash_b64)
-    except Exception:
-        return False
-    dk = hashlib.pbkdf2_hmac("sha256", raw_password.encode("utf-8"), salt, 120_000)
-    return hmac.compare_digest(dk, expected)
-
-
-def next_virtual_telegram_id() -> int:
-    row = db_fetchone("SELECT MIN(telegram_id) AS min_tid FROM users;")
-    try:
-        min_tid = int(row["min_tid"]) if row and row["min_tid"] is not None else 0
-    except Exception:
-        min_tid = 0
-    return min_tid - 1 if min_tid <= 0 else -1
-
-
-def ensure_user_auth_fields() -> None:
-    cols = {r["name"] for r in db_fetchall("PRAGMA table_info(users);")}
-    if "login" not in cols:
-        db_exec("ALTER TABLE users ADD COLUMN login TEXT;")
-    if "password_hash" not in cols:
-        db_exec("ALTER TABLE users ADD COLUMN password_hash TEXT;")
-    if "team" not in cols:
-        db_exec("ALTER TABLE users ADD COLUMN team TEXT;")
-    if "updated_at" not in cols:
-        db_exec("ALTER TABLE users ADD COLUMN updated_at TEXT;")
-    db_exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_login ON users(login);")
-
-    now = iso_now(CFG.tzinfo())
-    rows = db_fetchall(
-        "SELECT id, telegram_id, login, password_hash, created_at, updated_at FROM users;"
-    )
-    for row in rows:
-        login = str(row["login"] or "").strip()
-        if not login:
-            login = f"tg_{row['telegram_id']}"
-        password_hash = str(row["password_hash"] or "").strip()
-        if not password_hash:
-            password_hash = hash_password(secrets.token_urlsafe(12))
-        updated_at = row["updated_at"] or row["created_at"] or now
-        db_exec(
-            """
-            UPDATE users
-            SET login=?, password_hash=?, updated_at=?
-            WHERE id=?;
-            """,
-            (login, password_hash, updated_at, int(row["id"])),
-        )
-
-def ensure_magic_links_fields() -> None:
-    cols = {r["name"] for r in db_fetchall("PRAGMA table_info(magic_links);")}
-    if "target_app" not in cols:
-        db_exec("ALTER TABLE magic_links ADD COLUMN target_app TEXT NOT NULL DEFAULT 'webapp';")
-
 
 
 def init_db() -> None:
@@ -345,55 +222,13 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             telegram_id INTEGER UNIQUE NOT NULL,
-            login TEXT,
-            password_hash TEXT,            
             name TEXT,
-            team TEXT,            
             role TEXT NOT NULL,
             active INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL,
-            updated_at TEXT
+            created_at TEXT NOT NULL
         );
         """
     )
-    ensure_user_auth_fields()
-    db_exec(
-        """
-        CREATE TABLE IF NOT EXISTS registration_requests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            login TEXT NOT NULL,
-            password_hash TEXT NOT NULL,
-            name TEXT,
-            team TEXT,
-            role TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending',
-            created_at TEXT NOT NULL,
-            reviewed_at TEXT,
-            reviewed_by_user_id INTEGER,
-            UNIQUE(login),
-            FOREIGN KEY (reviewed_by_user_id) REFERENCES users(id) ON DELETE SET NULL
-        );
-        """
-    )
-    db_exec(
-        """
-        CREATE TABLE IF NOT EXISTS magic_links (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            token_hash TEXT UNIQUE NOT NULL,
-            user_id INTEGER NOT NULL,
-            telegram_id INTEGER,
-            target_app TEXT NOT NULL,
-            expires_at TEXT NOT NULL,
-            used_at TEXT,
-            created_at TEXT NOT NULL,
-            created_ip TEXT,
-            ua TEXT,
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-        );
-        """
-    )
-    ensure_magic_links_fields()
-
     # months
     db_exec(
         """
@@ -1152,15 +987,6 @@ def get_attachment_or_404(attachment_id: int) -> sqlite3.Row:
         raise HTTPException(status_code=404, detail="Attachment not found")
     return row
 
-def content_disposition_header(filename: str, disposition: str) -> str:
-    cleaned = re.sub(r'[\r\n"]', "_", (filename or "").strip())
-    if not cleaned:
-        cleaned = "download"
-    ascii_fallback = re.sub(r"[^\x20-\x7E]", "_", cleaned)
-    encoded = urllib.parse.quote(cleaned, safe="")
-    return f"{disposition}; filename=\"{ascii_fallback}\"; filename*=UTF-8''{encoded}"
-
-
 
 def attachment_storage_dir(entity_id: int, created_at: str) -> Path:
     try:
@@ -1228,33 +1054,18 @@ def sync_allowlist_to_db(allow: Dict[int, Dict[str, Any]]) -> None:
         if not existing:
             db_exec(
                 """
-                INSERT INTO users (telegram_id, login, password_hash, name, role, active, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+                INSERT INTO users (telegram_id, name, role, active, created_at)
+                VALUES (?, ?, ?, ?, ?);
                 """,
-                (
-                    tid,
-                    f"tg_{tid}",
-                    hash_password(secrets.token_urlsafe(12)),
-                    u.get("name"),
-                    u.get("role", "viewer"),
-                    1 if u.get("active", True) else 0,
-                    now,
-                    now,
-                ),
+                (tid, u.get("name"), u.get("role", "viewer"), 1 if u.get("active", True) else 0, now),
             )
         else:
             db_exec(
                 """
-                UPDATE users SET name=?, role=?, active=?, updated_at=?
+                UPDATE users SET name=?, role=?, active=?
                 WHERE telegram_id=?;
                 """,
-                (
-                    u.get("name"),
-                    u.get("role", existing["role"]),
-                    1 if u.get("active", True) else 0,
-                    now,
-                    tid,
-                ),
+                (u.get("name"), u.get("role", existing["role"]), 1 if u.get("active", True) else 0, tid),
             )
 
 def refresh_allowlist_if_needed() -> Dict[int, Dict[str, Any]]:
@@ -1337,26 +1148,6 @@ def create_cashflow_collect_request_if_needed(
             source_payload=payload,
         )
 
-def build_cashflow_signer_notification(request_id: int) -> Optional[Dict[str, Any]]:
-    import cashflow_models as cf
-
-    with db_connect() as conn:
-        cf.init_cashflow_db(conn)
-        view = cf.build_request_view(conn, request_id)
-    req = view.get("request") or {}
-    participants = view.get("participants") or []
-    signers = [p["telegram_id"] for p in participants if not p.get("is_admin")]
-    if not signers:
-        return None
-    return {
-        "request_id": int(request_id),
-        "account": req.get("account"),
-        "op_type": req.get("op_type"),
-        "amount": float(req.get("amount") or 0),
-        "signer_ids": signers,
-    }
-
-
 def finalize_cashflow_collect_request(request_id: int) -> Optional[int]:
     req = db_fetchone("SELECT * FROM cash_requests WHERE id=?;", (int(request_id),))
     if not req:
@@ -1401,19 +1192,6 @@ def finalize_cashflow_collect_request(request_id: int) -> Optional[int]:
         user_row = db_fetchone("SELECT id FROM users WHERE telegram_id=?;", (int(actor_tid),))
     user_id = int(user_row["id"]) if user_row else None
 
-    now = iso_now(CFG.tzinfo())
-    if cashless > 0:
-        upsert_service_cashless(
-            month_id=month_id,
-            service_date=service_date,
-            income_type=income_type,
-            account=account,
-            cashless=cashless,
-            user_id=user_id,
-            now=now,
-        )
-
-
     before = db_fetchone(
         """
         SELECT * FROM services
@@ -1422,9 +1200,7 @@ def finalize_cashflow_collect_request(request_id: int) -> Optional[int]:
         (month_id, service_date, account, income_type),
     )
 
-    if before:
-        cashless = float(before["cashless"] or 0.0)
-        total = round(cashless + cash, 2)
+    now = iso_now(CFG.tzinfo())
     if before:
         db_exec(
             """
@@ -1459,56 +1235,6 @@ def finalize_cashflow_collect_request(request_id: int) -> Optional[int]:
     recalc_services_for_month(month_id)
     ensure_tithe_expense(month_id, user_id=user_id)
     return service_id
-
-
-def upsert_service_cashless(
-    *,
-    month_id: int,
-    service_date: str,
-    income_type: str,
-    account: str,
-    cashless: float,
-    user_id: Optional[int],
-    now: str,
-) -> Optional[int]:
-    if cashless <= 0:
-        return None
-    before = db_fetchone(
-        """
-        SELECT * FROM services
-        WHERE month_id=? AND service_date=? AND account=? AND income_type=?;
-        """,
-        (month_id, service_date, account, income_type),
-    )
-    if before:
-        cash = float(before["cash"] or 0.0)
-        total = round(cashless + cash, 2)
-        db_exec(
-            """
-            UPDATE services
-            SET cashless=?, total=?, income_type=?, account=?, updated_at=?
-            WHERE id=?;
-            """,
-            (cashless, total, income_type, account, now, before["id"]),
-        )
-        after = db_fetchone("SELECT * FROM services WHERE id=?;", (before["id"],))
-        log_audit(user_id, "UPDATE", "service", int(before["id"]), dict(before), dict(after) if after else None)
-        return int(before["id"])
-
-    service_id = db_exec_returning_id(
-        """
-        INSERT INTO services (
-            month_id, service_date, idx, cashless, cash, total,
-            weekly_min_needed, mnsps_status, pvs_ratio, income_type, account,
-            created_at, updated_at
-        ) VALUES (?, ?, 0, ?, 0, ?, 0, 'Не собрана', 0, ?, ?, ?, ?);
-        """,
-        (month_id, service_date, cashless, cashless, income_type, account, now, now),
-    )
-    after = db_fetchone("SELECT * FROM services WHERE id=?;", (service_id,))
-    log_audit(user_id, "CREATE", "service", int(service_id), None, dict(after) if after else None)
-    return int(service_id)
-
 
 def register_bot_subscriber(telegram_id: int) -> None:
     now = iso_now(CFG.tzinfo())
@@ -1583,15 +1309,82 @@ def verify_session_token(token: str, secret: str) -> Dict[str, Any]:
         raise HTTPException(status_code=401, detail="Invalid token format")
 
     expected = hmac.new(secret.encode("utf-8"), body.encode("utf-8"), hashlib.sha256).digest()
-    if not hmac.compare_digest(_b64url_decode(sig), expected):
+    try:
+        provided_sig = _b64url_decode(sig)
+    except Exception:
         raise HTTPException(status_code=401, detail="Invalid token signature")
 
-    payload = json.loads(_b64url_decode(body).decode("utf-8"))
+    if not hmac.compare_digest(provided_sig, expected):
+        raise HTTPException(status_code=401, detail="Invalid token signature")
+
+    try:
+        payload = json.loads(_b64url_decode(body).decode("utf-8"))
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token payload")
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=401, detail="Invalid token payload")
+
     exp = int(payload.get("exp", 0))
     if exp and int(time.time()) > exp:
         raise HTTPException(status_code=401, detail="Token expired")
     return payload
 
+
+# ---------------------------
+# Telegram WebApp initData validation
+# ---------------------------
+
+def validate_telegram_init_data(init_data: str, bot_token: str, max_age_sec: int = 7 * 24 * 3600) -> Dict[str, Any]:
+    """
+    Telegram WebApp initData verification:
+    - Parse query string
+    - Exclude 'hash'
+    - data_check_string = '\n'.join(sorted([f"{k}={v}"]))
+    - secret_key = HMAC_SHA256(key=b"WebAppData", msg=bot_token)
+    - check_hash = HMAC_SHA256(key=secret_key, msg=data_check_string).hexdigest()
+    """
+    if not init_data:
+        raise HTTPException(status_code=400, detail="initData is required")
+
+    parsed = dict(urllib.parse.parse_qsl(init_data, keep_blank_values=True))
+    received_hash = parsed.get("hash")
+    if not received_hash:
+        raise HTTPException(status_code=401, detail="Missing hash in initData")
+
+    # auth_date freshness (optional but recommended)
+    try:
+        auth_date = int(parsed.get("auth_date", "0"))
+        if auth_date and (int(time.time()) - auth_date) > max_age_sec:
+            raise HTTPException(status_code=401, detail="initData is too old")
+    except ValueError:
+        pass
+
+    data_pairs = []
+    for k, v in parsed.items():
+        if k == "hash":
+            continue
+        data_pairs.append(f"{k}={v}")
+    data_pairs.sort()
+    data_check_string = "\n".join(data_pairs)
+
+    secret_key = hmac.new(b"WebAppData", bot_token.encode("utf-8"), hashlib.sha256).digest()
+    computed_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
+
+    if not hmac.compare_digest(computed_hash, received_hash):
+        raise HTTPException(status_code=401, detail="initData validation failed")
+
+    # Extract user (JSON string)
+    user_raw = parsed.get("user")
+    if not user_raw:
+        raise HTTPException(status_code=401, detail="No user in initData")
+
+    try:
+        user_obj = json.loads(user_raw)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid user payload in initData")
+
+    return user_obj
 
 
 # ---------------------------
@@ -1686,7 +1479,7 @@ def recalc_services_for_month(month_id: int) -> None:
             pvs = 0.0
             weekly_min_for_row = 0.0
         elif income_type == "donation":
-            status = "Собрана" if (weekly_min and total > weekly_min) else "Не собрана"
+            status = "Собрана" if (weekly_min and total >= weekly_min) else "Не собрана"
             pvs = (total / weekly_min) if weekly_min else 0.0
             weekly_min_for_row = weekly_min
         else:
@@ -1790,15 +1583,10 @@ def ensure_tithe_expense(month_id: int, user_id: Optional[int] = None) -> None:
         log_audit(user_id, "CREATE_SYSTEM_TITHE", "expense", int(new_id), None, after)
 
 
-def compute_month_summary(
-    month_id: int,
-    ensure_tithe: bool = True,
-    refresh_services: bool = False,
-) -> Dict[str, Any]:
+def compute_month_summary(month_id: int, ensure_tithe: bool = True) -> Dict[str, Any]:
     m = get_month_by_id(month_id)
-    if refresh_services:
-        # Services should be recalculated in case weekly_min_needed changed
-        recalc_services_for_month(month_id)
+    # Services should be recalculated in case weekly_min_needed changed
+    recalc_services_for_month(month_id)
 
     if ensure_tithe:
         ensure_tithe_expense(month_id, user_id=None)
@@ -1965,7 +1753,7 @@ def compute_year_analytics(year: int) -> Dict[str, Any]:
             )
             continue
 
-        summary = compute_month_summary(int(row["id"]), ensure_tithe=False, refresh_services=False)
+        summary = compute_month_summary(int(row["id"]), ensure_tithe=True)
         income = float(summary["month_income_sum"])
         expenses = float(summary["month_expenses_sum"])
         balance = float(summary["month_balance"])
@@ -2030,7 +1818,7 @@ def compute_year_analytics(year: int) -> Dict[str, Any]:
     }
     prev_months = db_fetchall("SELECT id FROM months WHERE year=?;", (prev_year,))
     for row in prev_months:
-        summary = compute_month_summary(int(row["id"]), ensure_tithe=False, refresh_services=False)
+        summary = compute_month_summary(int(row["id"]), ensure_tithe=True)
         prev_totals["income"] += float(summary["month_income_sum"])
         prev_totals["expenses"] += float(summary["month_expenses_sum"])
         prev_totals["balance"] += float(summary["month_balance"])
@@ -2308,31 +2096,13 @@ def log_message_delivery(
 # API Auth + roles
 # ---------------------------
 
+class AuthTelegramIn(BaseModel):
+    initData: str = Field(..., description="Telegram WebApp initData string")
+
 
 class AuthOut(BaseModel):
     token: str
     user: Dict[str, Any]
-
-
-class MagicCreateIn(BaseModel):
-    telegram_id: int
-    target_app: str
-
-def _get_auth_user_from_allowlist(telegram_id: int, request: Optional[Request]) -> sqlite3.Row:
-    allow = refresh_allowlist_if_needed()
-    allow_user = allow.get(int(telegram_id))
-    login = f"tg_{telegram_id}"
-    if not allow_user or not allow_user.get("active"):
-        log_auth_event("telegram", login, request, "fail", "not_in_allowlist")
-        raise HTTPException(
-            status_code=403,
-            detail="User not allowed. Add Telegram ID to users.json.",
-        )
-    row = db_fetchone("SELECT * FROM users WHERE telegram_id=?;", (int(telegram_id),))
-    if not row or int(row["active"]) != 1:
-        log_auth_event("telegram", login, request, "fail", "inactive")
-        raise HTTPException(status_code=403, detail="User not allowed / inactive")
-    return row
 
 
 def get_bearer_token(request: Request) -> str:
@@ -2345,210 +2115,19 @@ def get_bearer_token(request: Request) -> str:
     return h.split(" ", 1)[1].strip()
 
 
-def clamp_magic_ttl(value: int) -> int:
-    return max(60, min(180, int(value)))
-
-
-def mask_token(token: str) -> str:
-    if not token:
-        return "****"
-    if len(token) <= 8:
-        return "****"
-    return f"{token[:4]}****{token[-4:]}"
-
-
-def hash_magic_token(token: str) -> str:
-    secret = CFG.MAGIC_LINK_SECRET or CFG.SESSION_SECRET
-    return hmac.new(secret.encode("utf-8"), token.encode("utf-8"), hashlib.sha256).hexdigest()
-
-
-def get_magic_login_token(request: Request) -> str:
-    h = request.headers.get("Authorization", "").strip()
-    if h.lower().startswith("bearer "):
-        return h.split(" ", 1)[1].strip()
-    token = request.query_params.get("token", "").strip()
-    if token:
-        return token
-    raise HTTPException(status_code=401, detail="invalid_token")
-
-
-def get_magic_target_roles(target_app: str) -> Tuple[str, ...]:
-    target = (target_app or "").strip().lower()
-    if target == "webapp":
-        return ("admin", "accountant", "viewer")
-    if target == "cashapp":
-        return ("cash_signer", "admin")
-    raise HTTPException(status_code=400, detail="invalid_target_app")
-
-
-def build_magic_link_url(target_app: str) -> Optional[str]:
-    target = (target_app or "").strip().lower()
-    if target == "cashapp":
-        url = cashapp_webapp_url()
-        if url:
-            return url
-        return f"{CFG.APP_URL.rstrip('/')}/cashapp"
-    if target == "webapp":
-        url = build_webapp_url()
-        if url:
-            return url
-        return CFG.WEBAPP_URL or f"{CFG.APP_URL.rstrip('/')}/webapp"
-    return None
-
-
-def append_magic_token(url: str, token: str) -> str:
-    parsed = urllib.parse.urlparse(url)
-    query = urllib.parse.parse_qs(parsed.query)
-    query["token"] = [token]
-    new_query = urllib.parse.urlencode(query, doseq=True)
-    return urllib.parse.urlunparse(parsed._replace(query=new_query))
-
-
-
 def get_current_user(request: Request) -> sqlite3.Row:
     token = get_bearer_token(request)
     payload = verify_session_token(token, CFG.SESSION_SECRET)
-    user_id = int(payload.get("user_id", 0))
-    if not user_id:
+    telegram_id = int(payload.get("telegram_id", 0))
+    if not telegram_id:
         raise HTTPException(status_code=401, detail="Invalid token payload")
 
-    u = db_fetchone("SELECT * FROM users WHERE id=?;", (user_id,))
+    # обновляем allowlist, чтобы роли в БД не отставали от users.json
+    refresh_allowlist_if_needed()
+    u = db_fetchone("SELECT * FROM users WHERE telegram_id=?;", (telegram_id,))
     if not u or int(u["active"]) != 1:
         raise HTTPException(status_code=403, detail="User not allowed / inactive")
     return u
-
-
-def admin_exists() -> bool:
-    row = db_fetchone("SELECT id FROM users WHERE role='admin' AND active=1 LIMIT 1;")
-    return bool(row)
-
-def has_registered_web_users() -> bool:
-    row = db_fetchone("SELECT id FROM users WHERE login NOT LIKE 'tg_%' LIMIT 1;")
-    return bool(row)
-
-
-def make_auth_response(row: sqlite3.Row) -> Dict[str, Any]:
-    exp = int(time.time()) + 7 * 24 * 3600
-    token = make_session_token(
-        {
-            "user_id": int(row["id"]),
-            "role": str(row["role"]),
-            "exp": exp,
-        },
-        CFG.SESSION_SECRET,
-    )
-    return {
-        "token": token,
-        "user": {
-            "id": row["id"],
-            "telegram_id": row["telegram_id"],
-            "login": row["login"],
-            "name": row["name"],
-            "team": row["team"],
-            "role": row["role"],
-        },
-    }
-
-def create_magic_login_token(
-    *,
-    telegram_id: int,
-    target_app: str,
-    request: Optional[Request],
-) -> Tuple[str, int]:
-    target_roles = get_magic_target_roles(target_app)
-    row = _get_auth_user_from_allowlist(int(telegram_id), request)
-    role = str(row["role"])
-    if role not in target_roles:
-        log_auth_event("magic_create", f"tg_{telegram_id}", request, "fail", "insufficient_role")
-        raise HTTPException(status_code=403, detail="insufficient_role")
-
-    ttl = clamp_magic_ttl(CFG.MAGIC_LINK_TTL)
-    tz = CFG.tzinfo()
-    now = iso_now(tz)
-    expires_at = (dt.datetime.now(tz) + dt.timedelta(seconds=ttl)).isoformat()
-    token = secrets.token_urlsafe(24)
-    token_hash = hash_magic_token(token)
-    created_ip = request.client.host if request and request.client else None
-    ua = request.headers.get("user-agent") if request else None
-
-    for _ in range(3):
-        try:
-            db_exec(
-                """
-                INSERT INTO magic_links (
-                    token_hash, user_id, telegram_id, target_app,
-                    expires_at, used_at, created_at, created_ip, ua
-                )
-                VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?);
-                """,
-                (
-                    token_hash,
-                    int(row["id"]),
-                    int(telegram_id),
-                    target_app,
-                    expires_at,
-                    now,
-                    created_ip,
-                    ua,
-                ),
-            )
-            log_auth_event(
-                "magic_create",
-                f"tg_{telegram_id}",
-                request,
-                "success",
-                detail=f"token={mask_token(token)}",
-                user_id=int(row["id"]),
-            )
-            return token, ttl
-        except sqlite3.IntegrityError:
-            token = secrets.token_urlsafe(24)
-            token_hash = hash_magic_token(token)
-
-    log_auth_event("magic_create", f"tg_{telegram_id}", request, "fail", "token_collision")
-    raise HTTPException(status_code=500, detail="token_generation_failed")
-
-
-def exchange_magic_login_token(login_token: str, request: Optional[Request]) -> Dict[str, Any]:
-    token_hash = hash_magic_token(login_token)
-    row = db_fetchone("SELECT * FROM magic_links WHERE token_hash=?;", (token_hash,))
-    if not row:
-        log_auth_event("magic_exchange", "unknown", request, "fail", "invalid_token")
-        raise HTTPException(status_code=401, detail="invalid_token")
-    if row["used_at"]:
-        log_auth_event("magic_exchange", "unknown", request, "fail", "used_token")
-        raise HTTPException(status_code=401, detail="used_token")
-    expires_at = row["expires_at"]
-    try:
-        expires_dt = dt.datetime.fromisoformat(str(expires_at))
-    except Exception:
-        expires_dt = dt.datetime.min.replace(tzinfo=CFG.tzinfo())
-    if dt.datetime.now(CFG.tzinfo()) > expires_dt:
-        log_auth_event("magic_exchange", "unknown", request, "fail", "expired_token")
-        raise HTTPException(status_code=401, detail="expired_token")
-
-    user = db_fetchone("SELECT * FROM users WHERE id=?;", (int(row["user_id"]),))
-    if not user or int(user["active"]) != 1:
-        log_auth_event("magic_exchange", "unknown", request, "fail", "user_inactive")
-        raise HTTPException(status_code=403, detail="user_inactive")
-
-    target_roles = get_magic_target_roles(str(row["target_app"]))
-    if str(user["role"]) not in target_roles:
-        log_auth_event("magic_exchange", "unknown", request, "fail", "insufficient_role")
-        raise HTTPException(status_code=403, detail="insufficient_role")
-
-    now = iso_now(CFG.tzinfo())
-    db_exec("UPDATE magic_links SET used_at=? WHERE id=?;", (now, int(row["id"])))
-    log_auth_event(
-        "magic_exchange",
-        f"tg_{user['telegram_id']}",
-        request,
-        "success",
-        detail=f"token={mask_token(login_token)}",
-        user_id=int(user["id"]),
-    )
-    return make_auth_response(user)
-
 
 
 def require_role(*allowed_roles: str):
@@ -2558,50 +2137,6 @@ def require_role(*allowed_roles: str):
             raise HTTPException(status_code=403, detail="Insufficient role")
         return u
     return _dep
-def log_auth_event(
-    event: str,
-    login: str,
-    request: Optional[Request],
-    status: str,
-    detail: Optional[str] = None,
-    user_id: Optional[int] = None,
-) -> None:
-    details: Dict[str, Any] = {
-        "event": event,
-        "login": login,
-        "status": status,
-    }
-    if detail:
-        details["detail"] = detail
-    if user_id is not None:
-        details["user_id"] = int(user_id)
-    if request:
-        details["path"] = request.url.path
-        details["method"] = request.method
-        if request.client:
-            details["client"] = request.client.host
-        user_agent = request.headers.get("user-agent")
-        if user_agent:
-            details["user_agent"] = user_agent
-    level = "INFO" if status == "success" else "WARNING"
-    message = f"Auth {event} {status}"
-    try:
-        log_system_log(level, "auth", message, details=details)
-    except Exception:
-        pass
-
-def require_magic_create_secret(request: Request) -> None:
-    expected = CFG.MAGIC_LINK_SECRET
-    if not expected:
-        raise HTTPException(status_code=500, detail="magic_secret_not_configured")
-    provided = (
-        request.headers.get("x-magic-secret")
-        or request.headers.get("x-api-key")
-        or ""
-    ).strip()
-    if not provided or not hmac.compare_digest(provided, expected):
-        raise HTTPException(status_code=401, detail="invalid_magic_secret")
-
 
 
 # ---------------------------
@@ -2707,29 +2242,46 @@ def get_user_role_from_db(telegram_id: int) -> str:
     return str(row["role"])
 
 
-def main_menu_kb(role: str) -> ReplyKeyboardMarkup:
-    placeholder = "Выберите действие"
+def get_persistent_menu_url(role: str) -> Optional[str]:
+    if role == "cash_signer":
+        return cashapp_webapp_url()
+    if role in ("admin", "accountant", "viewer"):
+        return require_https_webapp_url(CFG.WEBAPP_URL)
+    return None
 
 
-    normalized_role = (role or "").strip()
-    buttons: List[List[KeyboardButton]] = []
-    if normalized_role == "cash_signer":
-        cashapp_url = cashapp_webapp_url()
-        if cashapp_url:
-            buttons.append([KeyboardButton(text="Подписать наличные", web_app=WebAppInfo(url=cashapp_url))])
-    else:
-        webapp_url = build_webapp_url()
-        if webapp_url:
-            label = "Открыть дашборд" if normalized_role in ("admin", "accountant", "viewer") else "Пройти авторизацию"
-            buttons.append([KeyboardButton(text=label, web_app=WebAppInfo(url=webapp_url))])
-    if normalized_role in ("admin", "accountant", "viewer", "cash_signer"):
-        buttons.append([KeyboardButton(text="Войти по ссылке")])
-    return ReplyKeyboardMarkup(
-        keyboard=buttons,
-        resize_keyboard=True,
-        is_persistent=True,
-        input_field_placeholder=placeholder,
-    )
+async def configure_persistent_menu(chat_id: int, role: str) -> None:
+    if not bot:
+        return
+    url = get_persistent_menu_url(role)
+    try:
+        if url:
+            await bot.set_chat_menu_button(
+                chat_id=chat_id,
+                menu_button=MenuButtonWebApp(text="Бухгалтерия", web_app=WebAppInfo(url=url)),
+            )
+        else:
+            await bot.set_chat_menu_button(chat_id=chat_id, menu_button=MenuButtonDefault())
+    except Exception:
+        pass
+
+
+def main_menu_kb(role: str) -> InlineKeyboardMarkup:
+    # Для администратора и подписанта используем только постоянную кнопку
+    # в нижнем меню Telegram, без дублирования кнопок в чате.
+    if role in ("admin", "cash_signer"):
+        return InlineKeyboardMarkup(inline_keyboard=[])
+
+    buttons = [
+        [
+            InlineKeyboardButton(text="Быстрый ввод пожертвования", callback_data="quick:donation"),
+            InlineKeyboardButton(text="Быстрый ввод расхода", callback_data="quick:expense"),
+        ],
+        [InlineKeyboardButton(text="Отчёты", callback_data="menu:reports")],
+    ]
+    if role == "admin":
+        buttons.append([InlineKeyboardButton(text="Настройки", callback_data="menu:settings")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def confirm_kb(kind: str) -> InlineKeyboardMarkup:
@@ -2744,7 +2296,7 @@ def confirm_kb(kind: str) -> InlineKeyboardMarkup:
 
 
 def reports_kb() -> InlineKeyboardMarkup:
-    webapp_url = build_webapp_url()
+    webapp_url = require_https_webapp_url(CFG.WEBAPP_URL)
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Отчёт за текущее воскресенье", callback_data="report:sunday")],
@@ -2758,8 +2310,19 @@ def reports_kb() -> InlineKeyboardMarkup:
         ]
     )
 
-def webapp_url_with_screen(screen: str) -> Optional[str]:
-    return build_webapp_url(screen)
+    def webapp_url_with_screen(screen: str) -> Optional[str]:
+        url = require_https_webapp_url(CFG.WEBAPP_URL)
+        if not url:
+            return None
+        try:
+            parsed = urllib.parse.urlparse(url)
+            query = urllib.parse.parse_qs(parsed.query)
+            query["screen"] = [screen]
+            new_query = urllib.parse.urlencode(query, doseq=True)
+            return urllib.parse.urlunparse(parsed._replace(query=new_query))
+        except Exception:
+            sep = "&" if "?" in url else "?"
+            return f"{url}{sep}screen={screen}"
 
 def parse_quick_input(text: str) -> Optional[Dict[str, Any]]:
     """
@@ -2876,7 +2439,6 @@ async def send_report_to_recipients(
                 await bot_send_or_http_error(chat_id, text, safe_markup)
                 log_message_delivery(kind, chat_id, "success", None)
             else:
-                await bot_send_safe(chat_id, text, safe_markup)
                 ok, err = await bot_send_safe(chat_id, text, safe_markup)
                 if ok:
                     log_message_delivery(kind, chat_id, "success", None)
@@ -2885,6 +2447,38 @@ async def send_report_to_recipients(
         except HTTPException as exc:
             log_message_delivery(kind, chat_id, "fail", str(exc.detail))
             errors.append(f"{chat_id}: {exc.detail}")
+    if errors and raise_on_error:
+        raise HTTPException(status_code=502, detail="; ".join(errors))
+
+
+async def send_report_png_to_recipients(
+        png_bytes: bytes,
+        filename: str,
+        caption: str,
+        recipients: List[int],
+        raise_on_error: bool,
+        kind: str = "report_png",
+) -> None:
+    if not recipients:
+        if raise_on_error:
+            raise HTTPException(status_code=400, detail="No report recipients configured")
+        return
+    if not bot:
+        if raise_on_error:
+            raise HTTPException(status_code=503, detail="Bot is not initialized")
+        return
+
+    errors: List[str] = []
+    for chat_id in recipients:
+        try:
+            payload = BufferedInputFile(png_bytes, filename=filename)
+            await bot.send_document(chat_id=chat_id, document=payload, caption=caption)
+            log_message_delivery(kind, chat_id, "success", None)
+        except Exception as exc:
+            msg = format_telegram_exception(exc)
+            log_message_delivery(kind, chat_id, "fail", msg)
+            if raise_on_error:
+                errors.append(f"{chat_id}: {msg}")
     if errors and raise_on_error:
         raise HTTPException(status_code=502, detail="; ".join(errors))
 
@@ -2902,14 +2496,15 @@ async def on_start(m: Message):
     if tid:
         register_bot_subscriber(tid)
 
-
     role = get_user_role_from_db(tid)
+    await configure_persistent_menu(m.chat.id, role)
     await m.answer(
-        "Для входа в систему нажмите «Пройти авторизацию».",
+        "Меню бухгалтерии:",
         reply_markup=main_menu_kb(role),
     )
-    webapp_url = build_webapp_url()
-    if not webapp_url:
+    webapp_url = require_https_webapp_url(CFG.WEBAPP_URL)
+    cashapp_url = cashapp_webapp_url()
+    if not webapp_url or (role == "cash_signer" and not cashapp_url):
         await m.answer(
             "Внимание: WebApp-кнопки доступны только по HTTPS.\n"
             "Настройте публичный HTTPS-домен и задайте APP_URL/WEBAPP_URL в .env."
@@ -2922,68 +2517,6 @@ async def on_text(m: Message):
         return
     tid = m.from_user.id
     if not is_allowed_telegram_user(tid):
-        return
-
-    text = m.text.strip()
-    role = get_user_role_from_db(tid)
-    if text == "Быстрый ввод пожертвования":
-        if role not in ("admin", "accountant", "viewer"):
-            await m.answer("Нет доступа")
-            return
-        await m.answer("Отправьте сообщением: `пож 8500 4800` (безнал нал)", parse_mode="Markdown")
-        return
-    if text == "Быстрый ввод расхода":
-        if role not in ("admin", "accountant", "viewer"):
-            await m.answer("Нет доступа")
-            return
-        await m.answer("Отправьте сообщением: `расход 2500 зал`", parse_mode="Markdown")
-        return
-    if text == "Отчёты":
-        if role not in ("admin", "accountant", "viewer"):
-            await m.answer("Нет доступа")
-            return
-        await m.answer("Отчёты:", reply_markup=reports_kb())
-        return
-    if text == "Настройки":
-        if role != "admin":
-            await m.answer("Нет доступа")
-            return
-        settings_url = webapp_url_with_screen("settings")
-        inline_keyboard = []
-        if settings_url:
-            inline_keyboard.append(
-                [InlineKeyboardButton(text="Открыть настройки (WebApp)", web_app=WebAppInfo(url=settings_url))]
-            )
-        await m.answer(
-            "Настройки:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=inline_keyboard),
-        )
-        return
-
-    if text == "Войти по ссылке":
-        target_app = "cashapp" if role == "cash_signer" else "webapp"
-        try:
-            token, ttl = create_magic_login_token(
-                telegram_id=int(tid),
-                target_app=target_app,
-                request=None,
-            )
-        except HTTPException as exc:
-            await m.answer(f"Ошибка: {exc.detail}")
-            return
-        base_url = build_magic_link_url(target_app)
-        if not base_url:
-            await m.answer("Ссылка недоступна. Проверьте настройки APP_URL/WEBAPP_URL.")
-            return
-        link = append_magic_token(base_url, token)
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="Открыть в браузере", url=link)]]
-        )
-        await m.answer(
-            f"Ваша ссылка для входа (действует {ttl} сек). "
-            "После открытия ссылка станет одноразовой.",
-            reply_markup=kb,
-        )
         return
 
     parsed = parse_quick_input(m.text)
@@ -3128,13 +2661,7 @@ async def on_reports_menu(cq: CallbackQuery):
         m = get_or_create_month(today.year, today.month)
         summary = compute_month_summary(int(m["id"]), ensure_tithe=True)
         text = format_month_summary_text(summary)
-        webapp_url = build_webapp_url()
-        inline_keyboard = []
-        if webapp_url:
-            inline_keyboard.append([InlineKeyboardButton(text="Открыть дашборд", web_app=WebAppInfo(url=webapp_url))])
-        await cq.message.answer(text, reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=inline_keyboard
-        ))
+        await cq.message.answer(text)
         await cq.answer()
         return
 
@@ -3208,15 +2735,6 @@ async def on_confirm(cq: CallbackQuery):
                 created_by_telegram_id=int(tid),
             )
             if request_id:
-                notify_payload = build_cashflow_signer_notification(request_id)
-                if notify_payload:
-                    import cashflow_bot as cfb
-
-                    await cfb.notify_signers_new_request(
-                        **notify_payload,
-                        is_retry=False,
-                        admin_comment=None,
-                    )
                 PENDING.pop(tid, None)
                 await cq.message.answer(
                     f"Создан запрос на подтверждение наличных №{request_id}. "
@@ -3311,11 +2829,16 @@ def fmt_money(x: float) -> str:
     return s
 
 
+def fmt_money_commas(x: float) -> str:
+    s = f"{x:,.2f}"
+    return s.replace(".00", "")
+
+
 def fmt_percent_1(x: float) -> str:
     return f"{x * 100:.1f}%"
 
 
-def build_sunday_report_text(today: dt.date) -> Tuple[str, InlineKeyboardMarkup]:
+def build_sunday_report_text(today: dt.date) -> Tuple[str, Optional[InlineKeyboardMarkup]]:
     tz = CFG.tzinfo()
     s_date = last_sunday(today)
     m = get_or_create_month(s_date.year, s_date.month)
@@ -3335,7 +2858,7 @@ def build_sunday_report_text(today: dt.date) -> Tuple[str, InlineKeyboardMarkup]
     cash = float(service["cash"]) if service else 0.0
     total = float(service["total"]) if service else 0.0
     weekly_min = float(service["weekly_min_needed"]) if service else calc_weekly_min_needed(m)
-    status = str(service["mnsps_status"]) if service else ("Собрана" if (weekly_min and total > weekly_min) else "Не собрана")
+    status = str(service["mnsps_status"]) if service else ("Собрана" if (weekly_min and total >= weekly_min) else "Не собрана")
     pvs = float(service["pvs_ratio"]) if service else ((total / weekly_min) if weekly_min else 0.0)
 
     summary = compute_month_summary(month_id, ensure_tithe=True)
@@ -3363,18 +2886,10 @@ def build_sunday_report_text(today: dt.date) -> Tuple[str, InlineKeyboardMarkup]
         f"• СДДР: <b>{sddr_text}</b>"
     )
 
-    webapp_url = build_webapp_url()
-    inline_keyboard = []
-    if webapp_url:
-        inline_keyboard.append([InlineKeyboardButton(text="Открыть дашборд", web_app=WebAppInfo(url=webapp_url))])
-    inline_keyboard.append([InlineKeyboardButton(text="Добавить расход", callback_data="quick:expense")])
-    if webapp_url:
-        inline_keyboard.append([InlineKeyboardButton(text="История месяца", web_app=WebAppInfo(url=webapp_url))])
-    kb = InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
-    return title + block1 + block2 + block3, kb
+    return title + block1 + block2 + block3, None
 
 
-def build_month_expenses_report_text(today: dt.date) -> Tuple[str, InlineKeyboardMarkup]:
+def build_month_expenses_report_text(today: dt.date) -> Tuple[str, Optional[InlineKeyboardMarkup]]:
     m = get_or_create_month(today.year, today.month)
     month_id = int(m["id"])
 
@@ -3423,13 +2938,7 @@ def build_month_expenses_report_text(today: dt.date) -> Tuple[str, InlineKeyboar
         f"• Факт. баланс: <b>{fmt_money(float(summary['fact_balance']))}</b>"
     )
 
-    webapp_url = build_webapp_url()
-    inline_keyboard = []
-    if webapp_url:
-        inline_keyboard.append([InlineKeyboardButton(text="Открыть дашборд", web_app=WebAppInfo(url=webapp_url))])
-    inline_keyboard.append([InlineKeyboardButton(text="Добавить расход", callback_data="quick:expense")])
-    kb = InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
-    return title + body, kb
+    return title + body, None
 
 
 def format_month_summary_text(summary: Dict[str, Any]) -> str:
@@ -3553,6 +3062,28 @@ async def run_job_with_logging(job_id: str, coro: Awaitable[None]) -> None:
             pass
 
 
+
+
+async def send_sunday_reports_bundle(
+        today: dt.date,
+        recipients: List[int],
+        raise_on_error: bool,
+) -> None:
+    text, kb = build_sunday_report_text(today)
+    await send_report_to_recipients(text, kb, recipients, raise_on_error=raise_on_error, kind="report")
+
+    month_row = get_or_create_month(today.year, today.month)
+    png_data, filename, month_meta = build_month_report_png(int(month_row["id"]), preset="landscape", pixel_ratio=2, dpi=192)
+    caption = f"PNG-отчёт за {RU_MONTHS[int(month_meta['month']) - 1]} {int(month_meta['year'])}"
+    await send_report_png_to_recipients(
+        png_data,
+        filename,
+        caption,
+        recipients,
+        raise_on_error=raise_on_error,
+        kind="report_png",
+    )
+
 async def run_sunday_report_job() -> None:
     async def _job() -> None:
         s = get_settings()
@@ -3561,8 +3092,7 @@ async def run_sunday_report_job() -> None:
             return
         tzinfo = ZoneInfo(str(s["timezone"] or CFG.TZ))
         today = dt.datetime.now(tzinfo).date()
-        text, kb = build_sunday_report_text(today)
-        await send_report_to_recipients(text, kb, recipients, raise_on_error=False, kind="report")
+        await send_sunday_reports_bundle(today, recipients, raise_on_error=False)
 
     await run_job_with_logging("sunday_report", _job())
 
@@ -3804,11 +3334,21 @@ async def lifespan(app: FastAPI):
 
 
 APP = FastAPI(title="Church Accounting Bot", version="1.0.0", lifespan=lifespan)
-app = APP
+
+
+def _build_cors_allow_origins() -> List[str]:
+    origins: List[str] = ["http://localhost", "http://localhost:8000"]
+    for candidate in (CFG.APP_URL, CFG.WEBAPP_URL):
+        value = (candidate or "").strip()
+        if not value or value == "*":
+            continue
+        if value not in origins:
+            origins.append(value)
+    return origins
 
 APP.add_middleware(
     CORSMiddleware,
-    allow_origins=[CFG.APP_URL, CFG.WEBAPP_URL, "http://localhost", "http://localhost:8000", "*"],
+    allow_origins=_build_cors_allow_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -3883,61 +3423,46 @@ def cashapp():
     return FileResponse(path, media_type="text/html")
 
 
-@APP.get("/favicon.ico")
-def favicon():
-    return Response(status_code=204)
-
-
 
 # ---------------------------
 # Auth
 # ---------------------------
 
+@APP.post("/api/auth/telegram", response_model=AuthOut)
+def auth_telegram(body: AuthTelegramIn, request: Request):
+    user_obj = validate_telegram_init_data(body.initData, CFG.BOT_TOKEN)
+    telegram_id = int(user_obj.get("id", 0))
+    if not telegram_id:
+        raise HTTPException(status_code=401, detail="Invalid Telegram user id")
 
+    allow = refresh_allowlist_if_needed()
+    allow_user = allow.get(telegram_id)
+    if not allow_user or not allow_user.get("active"):
+        raise HTTPException(status_code=403, detail="User not in allowlist or inactive")
 
-@APP.post("/api/auth/magic/create")
-def auth_magic_create(body: MagicCreateIn, request: Request):
-    require_magic_create_secret(request)
-    token, ttl = create_magic_login_token(
-        telegram_id=int(body.telegram_id),
-        target_app=body.target_app,
-        request=request,
+    # sync single user from allowlist (in case file changed)
+    sync_allowlist_to_db({telegram_id: allow_user})
+
+    u = db_fetchone("SELECT * FROM users WHERE telegram_id=?;", (telegram_id,))
+    if not u or int(u["active"]) != 1:
+        raise HTTPException(status_code=403, detail="User inactive")
+
+    # session token
+    exp = int(time.time()) + 7 * 24 * 3600
+    token = make_session_token(
+        {
+            "telegram_id": telegram_id,
+            "role": str(u["role"]),
+            "exp": exp,
+        },
+        CFG.SESSION_SECRET,
     )
-    return {"login_token": token, "expires_in": ttl}
-
-
-@APP.post("/api/auth/magic/exchange", response_model=AuthOut)
-def auth_magic_exchange(request: Request):
-    login_token = get_magic_login_token(request)
-    return exchange_magic_login_token(login_token, request)
+    return {"token": token, "user": {"telegram_id": telegram_id, "name": u["name"], "role": u["role"]}}
 
 
 @APP.get("/api/me")
 def me(u: sqlite3.Row = Depends(get_current_user)):
-    return {
-        "id": u["id"],
-        "telegram_id": u["telegram_id"],
-        "login": u["login"],
-        "name": u["name"],
-        "team": u["team"],
-        "role": u["role"],
-    }
-
-
-
-
-@APP.get("/api/admin/users")
-def list_users(u: sqlite3.Row = Depends(require_role("admin"))):
-    rows = db_fetchall(
-        """
-        SELECT id, telegram_id, login, name, team, role, active, created_at, updated_at
-        FROM users
-        ORDER BY id ASC;
-        """
-    )
-    return {"items": [dict(r) for r in rows]}
-
-
+    return {"id": u["id"], "telegram_id": u["telegram_id"], "name": u["name"], "role": u["role"]}
 
 
 # ---------------------------
@@ -4014,7 +3539,7 @@ def month_summary(
     month_id: int,
     u: sqlite3.Row = Depends(require_role("admin", "accountant", "viewer")),
 ):
-    return compute_month_summary(month_id, ensure_tithe=True, refresh_services=True)
+    return compute_month_summary(month_id, ensure_tithe=True)
 
 @APP.get("/api/months/{month_id}/budget")
 def list_month_budget(
@@ -4217,7 +3742,6 @@ def list_services(
 def create_service(
     month_id: int,
     body: ServiceIn,
-    bg: BackgroundTasks,
     u: sqlite3.Row = Depends(require_role("admin", "accountant")),
 ):
     ensure_month_open(month_id)
@@ -4245,28 +3769,6 @@ def create_service(
             created_by_telegram_id=int(u["telegram_id"]),
         )
         if request_id:
-            notify_payload = build_cashflow_signer_notification(request_id)
-            if notify_payload:
-                import cashflow_bot as cfb
-
-                bg.add_task(
-                    cfb.notify_signers_new_request,
-                    **notify_payload,
-                    is_retry=False,
-                    admin_comment=None,
-                )
-            if cashless > 0:
-                upsert_service_cashless(
-                    month_id=month_id,
-                    service_date=service_date,
-                    income_type=income_type,
-                    account=account,
-                    cashless=cashless,
-                    user_id=int(u["id"]),
-                    now=now,
-                )
-                recalc_services_for_month(month_id)
-                ensure_tithe_expense(month_id, user_id=int(u["id"]))
             return JSONResponse(
                 status_code=202,
                 content={
@@ -5178,8 +4680,8 @@ def get_attachment(
         raise HTTPException(status_code=404, detail="File not found")
 
     disposition = "inline" if int(inline or 1) == 1 else "attachment"
-    headers = {"Content-Disposition": content_disposition_header(row["orig_filename"], disposition)}
-    return FileResponse(target_path, media_type=row["mime"], headers=headers)
+    headers = {"Content-Disposition": f'{disposition}; filename="{row["orig_filename"]}"'}
+    return FileResponse(target_path, media_type=row["mime"], filename=row["orig_filename"], headers=headers)
 
 
 @APP.delete("/api/attachments/{attachment_id}")
@@ -5374,8 +4876,7 @@ async def api_report_sunday(u: sqlite3.Row = Depends(require_role("admin", "acco
 
     tzinfo = ZoneInfo(str(s["timezone"] or CFG.TZ))
     today = dt.datetime.now(tzinfo).date()
-    text, kb = build_sunday_report_text(today)
-    await send_report_to_recipients(text, kb, recipients, raise_on_error=True, kind="report")
+    await send_sunday_reports_bundle(today, recipients, raise_on_error=True)
     return {"ok": True}
 
 
@@ -5390,7 +4891,7 @@ async def api_report_month_expenses(u: sqlite3.Row = Depends(require_role("admin
     tzinfo = ZoneInfo(str(s["timezone"] or CFG.TZ))
     today = dt.datetime.now(tzinfo).date()
     text, kb = build_month_expenses_report_text(today)
-    await send_report_to_recipients(text, kb, recipients, raise_on_error=True, kind="report")
+    await send_report_to_recipients(text, kb, recipients, raise_on_error=False, kind="report")
     return {"ok": True}
 
 @APP.post("/api/reports/test")
@@ -5407,7 +4908,7 @@ async def api_report_test(u: sqlite3.Row = Depends(require_role("admin", "accoun
         f"Если вы это видите, доставка работает.\n"
         f"Время: {now:%Y-%m-%d %H:%M:%S %Z}"
     )
-    await send_report_to_recipients(text, None, recipients, raise_on_error=True, kind="report")
+    await send_report_to_recipients(text, None, recipients, raise_on_error=False, kind="report")
     return {"ok": True}
 
 # ---------------------------
@@ -5468,10 +4969,14 @@ async def api_restore_backup(
     backup_db_path = None
     try:
         with temp_file.open("wb") as f:
+            total_written = 0
             while True:
                 chunk = await file.read(1024 * 1024)
                 if not chunk:
                     break
+                total_written += len(chunk)
+                if total_written > MAX_BACKUP_UPLOAD_BYTES:
+                    raise HTTPException(status_code=413, detail="Backup file is too large")
                 f.write(chunk)
         if temp_file.stat().st_size == 0:
             raise HTTPException(status_code=400, detail="Empty file")
@@ -5532,6 +5037,882 @@ async def api_restore_backup(
 # ---------------------------
 # Export
 # ---------------------------
+
+PNG_PRESETS = {
+    "landscape": (1600, 900),
+    "square": (1080, 1080),
+    "story": (1080, 1920),
+}
+
+RU_MONTHS = [
+    "января",
+    "февраля",
+    "марта",
+    "апреля",
+    "мая",
+    "июня",
+    "июля",
+    "августа",
+    "сентября",
+    "октября",
+    "ноября",
+    "декабря",
+]
+
+
+def require_pillow() -> Tuple[Any, Any, Any]:
+    if importlib.util.find_spec("PIL") is None:
+        raise HTTPException(status_code=501, detail="Pillow (PIL) is required for PNG export")
+    from PIL import Image, ImageDraw, ImageFont
+
+    return Image, ImageDraw, ImageFont
+
+
+def load_ttf_font(image_font: Any, size: int, bold: bool = False) -> Any:
+    """
+    Пытаемся грузить красивый UI-шрифт (Menlo/Inter, если положишь рядом),
+    иначе системные DejaVu/Liberation.
+    """
+    base_dir = Path(__file__).resolve().parent
+
+    local_candidates = [
+        base_dir / ("Menlo-Bold.ttf" if bold else "Menlo-Regular.ttf"),
+        base_dir / "Menlo.ttf",
+        base_dir / ("Inter-Bold.ttf" if bold else "Inter-Regular.ttf"),
+        base_dir / ("Inter-SemiBold.ttf" if bold else "Inter-Regular.ttf"),
+        base_dir / ("SF-Pro-Display-Bold.ttf" if bold else "SF-Pro-Display-Regular.ttf"),
+    ]
+
+    sys_candidates = [
+        "/Library/Fonts/Menlo.ttc",
+        "/Library/Fonts/Menlo.ttf",
+        "/System/Library/Fonts/Menlo.ttc",
+        "/System/Library/Fonts/Menlo.ttf",
+        "/usr/share/fonts/truetype/menlo/Menlo-Bold.ttf" if bold else "/usr/share/fonts/truetype/menlo/Menlo-Regular.ttf",
+        "/usr/share/fonts/truetype/menlo/Menlo.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf" if bold else "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+        "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf",
+    ]
+
+    for p in [*local_candidates, *sys_candidates]:
+        try:
+            p_str = str(p)
+            if p_str.startswith("/") and not Path(p_str).exists():
+                continue
+            return image_font.truetype(p_str, size=size)
+        except Exception:
+            continue
+
+    return image_font.load_default()
+
+
+
+def text_bbox(draw: Any, text: str, font: Any) -> Tuple[int, int]:
+    bbox = draw.textbbox((0, 0), text, font=font)
+    return bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+
+def fit_text_ellipsis(draw: Any, text: str, font: Any, max_width: int) -> str:
+    if max_width <= 0:
+        return ""
+    if text_bbox(draw, text, font)[0] <= max_width:
+        return text
+    ellipsis = "…"
+    if text_bbox(draw, ellipsis, font)[0] > max_width:
+        return ""
+
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        candidate = text[:mid].rstrip() + ellipsis
+        if text_bbox(draw, candidate, font)[0] <= max_width:
+            lo = mid
+        else:
+            hi = mid - 1
+    return text[:lo].rstrip() + ellipsis
+
+
+def find_max_font_size_for_rows(
+    image_font: Any,
+    draw: Any,
+    rows: List[Tuple[str, str]],
+    max_label_w: int,
+    max_value_w: int,
+    max_row_h: int,
+    min_size: int,
+    max_size: int,
+) -> int:
+    for size in range(max_size, min_size - 1, -1):
+        font = load_ttf_font(image_font, size=size, bold=False)
+        fits_height = True
+        fits_width = True
+        for label, value in rows:
+            _, label_h = text_bbox(draw, label, font)
+            _, value_h = text_bbox(draw, value, font)
+            if max(label_h, value_h) > max_row_h:
+                fits_height = False
+                break
+            if text_bbox(draw, label, font)[0] > max_label_w or text_bbox(draw, value, font)[0] > max_value_w:
+                fits_width = False
+        if fits_height and fits_width:
+            return size
+    return min_size
+
+
+def draw_card(
+    img: Any,
+    xy: Tuple[int, int, int, int],
+    radius: int,
+    fill: Tuple[int, int, int],
+    shadow_alpha: int = 40,
+    shadow_blur: int = 18,
+    shadow_offset: Tuple[int, int] = (0, 10),
+    outline: Optional[Tuple[int, int, int]] = None,
+    outline_width: int = 0,
+) -> None:
+    """
+    Рисует карточку с мягкой тенью (GaussianBlur) на RGBA-канвасе.
+    img должен быть RGBA.
+    """
+    try:
+        from PIL import Image, ImageDraw, ImageFilter
+    except Exception:
+        # fallback на старое поведение без blur
+        draw = img  # если кто-то случайно передал draw
+        x0, y0, x1, y1 = xy
+        draw.rounded_rectangle((x0, y0, x1, y1), radius=radius, fill=fill)
+        return
+
+    x0, y0, x1, y1 = map(int, xy)
+    w = max(1, x1 - x0)
+    h = max(1, y1 - y0)
+
+    pad = shadow_blur * 2
+    layer_w = w + pad * 2
+    layer_h = h + pad * 2
+
+    # shadow layer (локальный — быстрее, чем на весь холст)
+    shadow = Image.new("RGBA", (layer_w, layer_h), (0, 0, 0, 0))
+    sd = ImageDraw.Draw(shadow)
+    sd.rounded_rectangle(
+        (pad, pad, pad + w, pad + h),
+        radius=radius,
+        fill=(0, 0, 0, max(0, min(255, shadow_alpha))),
+    )
+    shadow = shadow.filter(ImageFilter.GaussianBlur(shadow_blur))
+
+    ox, oy = shadow_offset
+    img.alpha_composite(shadow, dest=(x0 - pad + ox, y0 - pad + oy))
+
+    # card body
+    card = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    cd = ImageDraw.Draw(card)
+    cd.rounded_rectangle(
+        (0, 0, w, h),
+        radius=radius,
+        fill=(*fill, 255),
+        outline=(*outline, 255) if outline else None,
+        width=int(outline_width) if outline and outline_width else 0,
+    )
+    img.alpha_composite(card, dest=(x0, y0))
+
+
+
+def draw_pill(
+    draw: Any,
+    xy: Tuple[int, int],
+    text: str,
+    font: Any,
+    fill: Tuple[int, int, int],
+    text_color: Tuple[int, int, int],
+    padding: Tuple[int, int] = (12, 6),
+    radius: int = 12,
+    outline: Optional[Tuple[int, int, int]] = None,
+    outline_width: int = 0,
+) -> Tuple[int, int]:
+    x, y = xy
+    text_w, text_h = text_bbox(draw, text, font)
+    pad_x, pad_y = padding
+    pill_w = text_w + pad_x * 2
+    pill_h = text_h + pad_y * 2
+
+    draw.rounded_rectangle((x, y, x + pill_w, y + pill_h), radius=radius, fill=fill)
+    if outline and outline_width > 0:
+        draw.rounded_rectangle((x, y, x + pill_w, y + pill_h), radius=radius, outline=outline, width=outline_width)
+
+    draw.text((x + pad_x, y + pad_y), text, font=font, fill=text_color)
+    return pill_w, pill_h
+
+
+
+def render_month_report_png(
+    month_row: sqlite3.Row,
+    summary: Dict[str, Any],
+    services: List[sqlite3.Row],
+    top_categories: List[Dict[str, Any]],
+    expenses: List[sqlite3.Row],
+    subaccount_services: List[sqlite3.Row],
+    subaccount_expenses: List[sqlite3.Row],
+    preset: str,
+    pixel_ratio: int = 2,   # <-- плотность пикселей (1..4)
+    dpi: int = 192,         # <-- DPI метаданные (72..600)
+) -> bytes:
+    Image, ImageDraw, ImageFont = require_pillow()
+
+    # размеры делаем "ретина"
+    base_w, base_h = PNG_PRESETS[preset]
+    pixel_ratio = int(max(1, min(4, pixel_ratio)))
+    w, h = int(base_w * pixel_ratio), int(base_h * pixel_ratio)
+    scale = w / 1600.0
+
+    # палитра (чуть спокойнее/дороже)
+    color_bg = (243, 246, 251)
+    color_card = (255, 255, 255)
+    color_card2 = (241, 245, 249)
+    color_text = (15, 23, 42)
+    color_muted = (71, 85, 105)
+    color_muted2 = (100, 116, 139)
+    color_stroke = (226, 232, 240)
+
+    color_accent = (16, 185, 129)        # green
+    color_accent_soft = (209, 250, 229)
+
+    color_danger = (239, 68, 68)         # red
+    color_danger_soft = (254, 226, 226)
+
+    color_warn = (245, 158, 11)          # amber
+    color_warn_soft = (254, 243, 199)
+
+    # типографика
+    font_title = load_ttf_font(ImageFont, size=int(44 * scale), bold=True)
+    font_kpi_value = load_ttf_font(ImageFont, size=int(34 * scale), bold=True)
+    font_kpi_label = load_ttf_font(ImageFont, size=int(16 * scale), bold=False)
+    font_section = load_ttf_font(ImageFont, size=int(20 * scale), bold=True)
+    font_body = load_ttf_font(ImageFont, size=int(16 * scale), bold=False)
+    font_small = load_ttf_font(ImageFont, size=int(13 * scale), bold=False)
+    font_bar_value = load_ttf_font(ImageFont, size=int(15 * scale), bold=True)
+
+    margin = int(44 * scale)
+    gap = int(20 * scale)
+    radius = int(18 * scale)
+
+    # dynamic height for text-heavy blocks (plan + expense structure)
+    plan_items = [
+        ("МНСП", fmt_money(float(summary.get("monthly_min_needed") or 0.0))),
+        ("Выполнение МНСП", fmt_percent_1(float(summary.get("monthly_completion") or 0.0))),
+        ("СДДР", fmt_money(float(summary.get("sddr") or 0.0))),
+        ("К прошлому месяцу", f"{float(summary.get('psdpm') or 0.0) * 100:.1f}%"),
+        ("Среднее пожертвование", fmt_money(float(summary.get("avg_sunday") or 0.0))),
+    ]
+
+    kpi_y = margin + int(64 * scale)
+    kpi_h = int(148 * scale)
+    section_y = kpi_y + kpi_h + int(30 * scale)
+    footer_h = int(36 * scale)
+    left_w = int(w * 0.40)
+
+    tmp_img = Image.new("RGBA", (32, 32), (0, 0, 0, 0))
+    tmp_draw = ImageDraw.Draw(tmp_img)
+    progress_font = load_ttf_font(ImageFont, size=max(11, int(13 * scale)), bold=False)
+    _, progress_label_h = text_bbox(tmp_draw, "Прогресс", progress_font)
+    body_line_h = text_bbox(tmp_draw, "Ag", font_body)[1]
+
+    plan_rows_h = len(plan_items) * max(body_line_h + int(6 * scale), int(20 * scale))
+    plan_min_h = int(56 * scale) + plan_rows_h + int(12 * scale) + progress_label_h + max(int(4 * scale), int(6 * scale)) + max(8, int(10 * scale)) + int(18 * scale)
+    plan_target_h = max(int(252 * scale), plan_min_h)
+
+    legend_rows = min(6, max(1, len([c for c in top_categories if float(c.get("sum") or 0.0) > 0.0])))
+    legend_h = int(8 * scale) + legend_rows * int(24 * scale)
+    expenses_target_h = max(int(220 * scale), int(52 * scale) + legend_h + int(16 * scale))
+
+    top_h_min = max(int(280 * scale), plan_target_h + gap + expenses_target_h)
+    list_card_min_h = max(int(180 * scale), int(220 * scale))
+    required_content_h = top_h_min + gap + list_card_min_h
+    required_h = section_y + required_content_h + footer_h + margin
+    if required_h > h:
+        h = required_h
+
+    # RGBA холст для мягких теней
+    bg = Image.new("RGBA", (w, h), (*color_bg, 255))
+    draw = ImageDraw.Draw(bg)
+
+    # title
+    month_name = RU_MONTHS[int(month_row["month"]) - 1]
+    title = f"Отчёт за {month_name} {int(month_row['year'])}"
+    draw.text((margin, margin), title, font=font_title, fill=color_text)
+
+    # KPI
+    kpi_w = int((w - margin * 2 - gap * 3) / 4)
+
+    income = float(summary.get("month_income_sum") or 0.0)
+    spend = float(summary.get("month_expenses_sum") or 0.0)
+    bal = float(summary.get("month_balance") or 0.0)
+    fbal = float(summary.get("fact_balance") or 0.0)
+
+    kpis = [
+        ("Доход", fmt_money(income), color_accent, color_accent_soft),
+        ("Расход", fmt_money(spend), color_danger, color_danger_soft),
+        ("Баланс месяца", fmt_money(bal), (color_accent if bal >= 0 else color_danger), (color_accent_soft if bal >= 0 else color_danger_soft)),
+        ("Факт. баланс", fmt_money(fbal), (color_accent if fbal >= 0 else color_danger), (color_accent_soft if fbal >= 0 else color_danger_soft)),
+    ]
+
+    for idx, (label, value, kcol, ksoft) in enumerate(kpis):
+        x0 = margin + idx * (kpi_w + gap)
+        card = (x0, kpi_y, x0 + kpi_w, kpi_y + kpi_h)
+        is_fact_balance = (label == "Факт. баланс")
+        card_fill = (245, 255, 250) if is_fact_balance and fbal >= 0 else ((255, 246, 246) if is_fact_balance else color_card)
+        card_outline = kcol if is_fact_balance else None
+        card_outline_width = max(2, int(2 * scale)) if is_fact_balance else 0
+        draw_card(
+            bg, card, radius, card_fill,
+            shadow_alpha=38, shadow_blur=int(18 * scale), shadow_offset=(0, int(10 * scale)),
+            outline=card_outline, outline_width=card_outline_width,
+        )
+
+        # маленький акцентный индикатор слева
+        stripe_w = max(3, int(4 * scale))
+        draw.rounded_rectangle(
+            (x0 + int(14 * scale), kpi_y + int(18 * scale), x0 + int(14 * scale) + stripe_w, kpi_y + kpi_h - int(18 * scale)),
+            radius=int(6 * scale),
+            fill=kcol,
+        )
+
+        draw.text((x0 + int(26 * scale), kpi_y + int(18 * scale)), label, font=font_kpi_label, fill=color_muted2)
+        draw.text((x0 + int(26 * scale), kpi_y + int(58 * scale)), value, font=font_kpi_value, fill=color_text)
+
+        # pill справа сверху (мягкая)
+        pill_text = "₽"
+        pill_w, pill_h = draw_pill(
+            draw,
+            (x0 + kpi_w - int(56 * scale), kpi_y + int(16 * scale)),
+            pill_text,
+            font_small,
+            fill=ksoft,
+            text_color=kcol,
+            radius=int(12 * scale),
+        )
+
+    # Layout columns
+    content_h = h - section_y - footer_h - margin
+
+    left_w = int(w * 0.40)
+    right_w = w - margin * 2 - gap - left_w
+    left_x = margin
+    right_x = left_x + left_w + gap
+
+    list_card_h = min(int(260 * scale), max(int(180 * scale), int(content_h * 0.30)))
+    top_h = max(content_h - list_card_h - gap, int(280 * scale))
+
+    # --- PLAN CARD (с прогресс-баром) ---
+    plan_h = max(plan_target_h, int(top_h * 0.52))
+    plan_card = (left_x, section_y, left_x + left_w, section_y + plan_h)
+    draw_card(bg, plan_card, radius, color_card, shadow_alpha=38, shadow_blur=int(18 * scale), shadow_offset=(0, int(10 * scale)))
+    draw.text((left_x + int(18 * scale), section_y + int(16 * scale)), "План/цели", font=font_section, fill=color_text)
+
+    psdpm = summary.get("psdpm")
+    psdpm_text = f"{float(psdpm)*100:.1f}%" if isinstance(psdpm, (int, float)) else "—"
+    completion_val = float(summary.get("monthly_completion") or 0.0)  # 0..1
+    completion_txt = fmt_percent_1(completion_val)
+
+    plan_items = [
+        ("МНСП", fmt_money(float(summary.get("monthly_min_needed") or 0.0))),
+        ("Выполнение МНСП", completion_txt),
+        ("СДДР", fmt_money(float(summary.get("sddr") or 0.0))),
+        ("К прошлому месяцу", psdpm_text),
+        ("Среднее пожертвование", fmt_money(float(summary.get("avg_sunday") or 0.0))),
+    ]
+
+    # progress bar
+    bar_x0 = left_x + int(18 * scale)
+    bar_w = left_w - int(36 * scale)
+    bar_h = max(8, int(10 * scale))
+    r = bar_h // 2
+
+    progress_font = load_ttf_font(ImageFont, size=max(11, int(13 * scale)), bold=False)
+    progress_label_w, progress_label_h = text_bbox(draw, "Прогресс", progress_font)
+
+    plan_top_y = section_y + int(56 * scale)
+    plan_inner_right = left_x + left_w - int(18 * scale)
+    plan_bottom_padding = int(18 * scale)
+    bar_gap_top = max(int(4 * scale), int(6 * scale))
+    bar_gap_bottom = int(12 * scale)
+    bar_y0 = plan_card[3] - plan_bottom_padding - bar_h
+    progress_y = max(plan_top_y, bar_y0 - bar_gap_top - progress_label_h)
+
+    rows_area_bottom = progress_y - bar_gap_bottom
+    plan_available_h = max(int(20 * scale), rows_area_bottom - plan_top_y)
+    plan_row_h = max(int(18 * scale), int(plan_available_h / max(1, len(plan_items))))
+
+    max_label_w = max(int(80 * scale), int(bar_w * 0.58))
+    max_value_w = max(int(72 * scale), bar_w - max_label_w - int(12 * scale))
+
+    plan_font_size = find_max_font_size_for_rows(
+        ImageFont,
+        draw,
+        plan_items,
+        max_label_w=max_label_w,
+        max_value_w=max_value_w,
+        max_row_h=plan_row_h,
+        min_size=max(10, int(11 * scale)),
+        max_size=max(12, int(16 * scale)),
+    )
+    plan_font = load_ttf_font(ImageFont, size=plan_font_size, bold=False)
+
+    for idx, (label, value) in enumerate(plan_items):
+        line_top = plan_top_y + idx * plan_row_h
+        label_text = fit_text_ellipsis(draw, label, plan_font, max_label_w)
+        value_text = fit_text_ellipsis(draw, value, plan_font, max_value_w)
+
+        _, label_h = text_bbox(draw, label_text or " ", plan_font)
+        _, value_h = text_bbox(draw, value_text or " ", plan_font)
+        line_y = line_top + max(0, int((plan_row_h - max(label_h, value_h)) / 2))
+
+        draw.text((bar_x0, line_y), label_text, font=plan_font, fill=color_muted)
+        value_w, _ = text_bbox(draw, value_text, plan_font)
+        draw.text((plan_inner_right - value_w, line_y), value_text, font=plan_font, fill=color_text)
+
+    draw.text((bar_x0, progress_y), "Прогресс", font=progress_font, fill=color_muted2)
+    draw.rounded_rectangle((bar_x0, bar_y0, bar_x0 + bar_w, bar_y0 + bar_h), radius=r, fill=color_card2)
+    fill_w = int(bar_w * max(0.0, min(1.0, completion_val)))
+    if fill_w > 0:
+        draw.rounded_rectangle((bar_x0, bar_y0, bar_x0 + fill_w, bar_y0 + bar_h), radius=r, fill=color_accent)
+
+    # --- EXPENSE STRUCTURE (DONUT) ---
+    expenses_card_y = section_y + plan_h + gap
+    expenses_card = (left_x, expenses_card_y, left_x + left_w, section_y + top_h)
+    draw_card(
+        bg, expenses_card, radius, color_card,
+        shadow_alpha=38, shadow_blur=int(18 * scale), shadow_offset=(0, int(10 * scale)),
+        outline=color_stroke, outline_width=max(1, int(1 * scale)),
+    )
+    draw.text((left_x + int(18 * scale), expenses_card_y + int(16 * scale)), "Структура расходов", font=font_section, fill=color_text)
+
+    draw_pill(
+        draw,
+        (left_x + left_w - int(160 * scale), expenses_card_y + int(14 * scale)),
+        "Основной счёт",
+        font_small,
+        fill=color_accent_soft,
+        text_color=color_accent,
+        radius=int(12 * scale),
+    )
+
+    pie_pad = int(18 * scale)
+    pie_top = expenses_card_y + int(52 * scale)
+    pie_area_h = expenses_card[3] - pie_top - int(16 * scale)
+
+    pie_size = min(int(left_w * 0.46), pie_area_h)
+    pie_x0 = left_x + pie_pad
+    pie_y0 = pie_top + int((pie_area_h - pie_size) / 2)
+    pie_box = (pie_x0, pie_y0, pie_x0 + pie_size, pie_y0 + pie_size)
+
+    total_expenses = float(summary.get("month_expenses_sum") or 0.0)
+
+    palette = [
+        (37, 99, 235),   # blue
+        (16, 185, 129),  # green
+        (245, 158, 11),  # amber
+        (239, 68, 68),   # red
+        (139, 92, 246),  # violet
+        (14, 165, 233),  # sky
+    ]
+
+    cats_nonzero = [c for c in top_categories if float(c.get("sum") or 0.0) > 0.0]
+
+    if total_expenses <= 0 or not cats_nonzero:
+        msg = "Нет данных"
+        msg_w, msg_h = text_bbox(draw, msg, font_body)
+        draw.text((pie_x0 + (pie_size - msg_w) / 2, pie_y0 + (pie_size - msg_h) / 2), msg, font=font_body, fill=color_muted2)
+    else:
+        start_angle = -90
+        for idx, item in enumerate(cats_nonzero[:6]):
+            value = float(item["sum"])
+            sweep = 360.0 * (value / total_expenses)
+            draw.pieslice(pie_box, start=start_angle, end=start_angle + sweep, fill=palette[idx % len(palette)])
+            start_angle += sweep
+
+        # donut hole
+        cx = pie_x0 + pie_size / 2
+        cy = pie_y0 + pie_size / 2
+        hole = pie_size * 0.66
+        draw.ellipse((cx - hole / 2, cy - hole / 2, cx + hole / 2, cy + hole / 2), fill=color_card)
+
+        # center text
+        center_label = "Итого"
+        center_value = fmt_money_commas(total_expenses)
+        lw, lh = text_bbox(draw, center_label, font_small)
+        center_font = font_small
+        min_center_font_size = max(8, int(10 * scale))
+        for size in range(max(int(14 * scale), min_center_font_size), min_center_font_size - 1, -1):
+            candidate = load_ttf_font(ImageFont, size=size, bold=True)
+            cw, ch = text_bbox(draw, center_value, candidate)
+            if cw <= hole * 0.84 and ch <= hole * 0.44:
+                center_font = candidate
+                break
+        vw, vh = text_bbox(draw, center_value, center_font)
+        draw.text((cx - lw / 2, cy - (lh + vh) / 2 - int(2 * scale)), center_label, font=font_small, fill=color_muted2)
+        draw.text((cx - vw / 2, cy - (lh + vh) / 2 + lh + int(1 * scale)), center_value, font=center_font, fill=color_text)
+
+    # legend
+    legend_x = pie_x0 + pie_size + int(16 * scale)
+    legend_y = pie_top + int(8 * scale)
+    max_legend = 6
+
+    shown = cats_nonzero[:max_legend]
+    if shown:
+        for idx, item in enumerate(shown):
+            val = float(item["sum"])
+            pct = (val / total_expenses * 100.0) if total_expenses > 0 else 0.0
+            label = f"{item.get('category','—')}: {fmt_money(val)} • {pct:.0f}%"
+            color = palette[idx % len(palette)]
+            y = legend_y + idx * int(24 * scale)
+            draw.rounded_rectangle((legend_x, y + int(4 * scale), legend_x + int(12 * scale), y + int(16 * scale)), radius=int(4 * scale), fill=color)
+            draw.text((legend_x + int(18 * scale), y), label, font=font_small, fill=color_text)
+
+    # --- INCOME CHART ---
+    chart_card = (right_x, section_y, right_x + right_w, section_y + top_h)
+    draw_card(
+        bg, chart_card, radius, color_card,
+        shadow_alpha=38, shadow_blur=int(18 * scale), shadow_offset=(0, int(10 * scale)),
+        outline=color_stroke, outline_width=max(1, int(1 * scale)),
+    )
+    draw.text((right_x + int(18 * scale), section_y + int(16 * scale)), "Доходы по служениям", font=font_section, fill=color_text)
+    draw_pill(
+        draw,
+        (right_x + right_w - int(160 * scale), section_y + int(14 * scale)),
+        "Основной счёт",
+        font_small,
+        fill=color_accent_soft,
+        text_color=color_accent,
+        radius=int(12 * scale),
+    )
+
+    chart_pad = int(24 * scale)
+    chart_x0 = right_x + chart_pad
+    chart_y0 = section_y + int(56 * scale)
+    chart_w = right_w - chart_pad * 2
+    sub_table_h = min(int(150 * scale), int(top_h * 0.34))
+    chart_h = top_h - sub_table_h - int(92 * scale)
+
+    base_y = chart_y0 + chart_h - int(18 * scale)
+    plot_h = chart_h - int(44 * scale)
+
+    service_items = []
+    for s in services:
+        total = float(s["total"] or 0.0)
+        try:
+            service_date = dt.date.fromisoformat(str(s["service_date"]))
+        except Exception:
+            continue
+        weekly_min_for_service = float(s["weekly_min_needed"] or 0.0)
+        service_items.append(
+            {
+                "date": service_date,
+                "total": total,
+                "status": str(s["mnsps_status"] or ""),
+                "weekly_min_needed": weekly_min_for_service,
+                "is_collected": weekly_min_for_service <= 0 or total >= weekly_min_for_service,
+            }
+        )
+    max_total = max([it["total"] for it in service_items], default=0.0)
+
+    # grid
+    for p in (0.25, 0.50, 0.75):
+        gy = base_y - int(plot_h * p)
+        draw.line((chart_x0, gy, chart_x0 + chart_w, gy), fill=color_stroke, width=max(1, int(1 * scale)))
+
+    if max_total <= 0:
+        msg = "Нет данных"
+        msg_w, msg_h = text_bbox(draw, msg, font_body)
+        draw.text((chart_x0 + (chart_w - msg_w) / 2, chart_y0 + (chart_h - msg_h) / 2), msg, font=font_body, fill=color_muted2)
+    else:
+        n = max(1, len(service_items))
+        bar_gap = max(6, int(10 * scale))
+        bar_w = max(10, int((chart_w - bar_gap * (n + 1)) / n))
+        bar_r = max(4, int(min(bar_w * 0.22, 12 * scale)))
+
+        for idx, item in enumerate(service_items):
+            bar_x = chart_x0 + bar_gap + idx * (bar_w + bar_gap)
+            bar_h = int((item["total"] / max_total) * plot_h)
+
+            status_ok = bool(item.get("is_collected"))
+            bar_color = color_accent if status_ok else color_danger
+
+            draw.rounded_rectangle(
+                (bar_x, base_y - bar_h, bar_x + bar_w, base_y),
+                radius=bar_r,
+                fill=bar_color,
+            )
+
+            value_label = fmt_money(item["total"])
+            val_w, val_h = text_bbox(draw, value_label, font_bar_value)
+            val_y = max(chart_y0 + int(6 * scale), base_y - bar_h - val_h - int(4 * scale))
+            draw.text((bar_x + (bar_w - val_w) / 2, val_y), value_label, font=font_bar_value, fill=color_text)
+
+            label = item["date"].strftime("%d.%m")
+            lw, lh = text_bbox(draw, label, font_small)
+            draw.text((bar_x + (bar_w - lw) / 2, base_y + int(6 * scale)), label, font=font_small, fill=color_muted2)
+
+        # weekly min (dashed)
+        weekly_min = float(summary.get("weekly_min_needed") or 0.0)
+        if weekly_min > 0:
+            line_y = base_y - int((min(weekly_min, max_total) / max_total) * plot_h)
+            dash = max(8, int(12 * scale))
+            gap2 = max(6, int(10 * scale))
+            x = chart_x0
+            while x < chart_x0 + chart_w:
+                x2 = min(chart_x0 + chart_w, x + dash)
+                draw.line((x, line_y, x2, line_y), fill=color_warn, width=max(2, int(2 * scale)))
+                x += dash + gap2
+            draw.text((chart_x0 + int(4 * scale), line_y - int(18 * scale)), "МНСП", font=font_small, fill=color_warn)
+
+    # --- SUBACCOUNTS TABLE ---
+    sub_table_x0 = right_x + int(18 * scale)
+    sub_table_x1 = right_x + right_w - int(18 * scale)
+    sub_table_y0 = chart_y0 + chart_h + int(30 * scale)
+    sub_table_y1 = section_y + top_h - int(16 * scale)
+
+    if sub_table_y1 > sub_table_y0:
+        draw.text((sub_table_x0, sub_table_y0 - int(22 * scale)), "Доп. счета", font=font_section, fill=color_text)
+        header_h = int(22 * scale)
+        draw.rounded_rectangle((sub_table_x0, sub_table_y0, sub_table_x1, sub_table_y0 + header_h), radius=int(10 * scale), fill=color_card2)
+
+        col_date_w = int((sub_table_x1 - sub_table_x0) * 0.30)
+        col_w = int((sub_table_x1 - sub_table_x0 - col_date_w) / 2)
+
+        draw.text((sub_table_x0 + int(8 * scale), sub_table_y0 + int(3 * scale)), "Дата", font=font_small, fill=color_muted)
+        draw.text((sub_table_x0 + col_date_w + int(8 * scale), sub_table_y0 + int(3 * scale)), "Praise +", font=font_small, fill=color_muted)
+        draw.text((sub_table_x0 + col_date_w + col_w + int(8 * scale), sub_table_y0 + int(3 * scale)), "Alpha +", font=font_small, fill=color_muted)
+
+        sub_income: Dict[dt.date, Dict[str, float]] = {}
+        for row in subaccount_services:
+            try:
+                d = dt.date.fromisoformat(str(row["service_date"]))
+            except Exception:
+                continue
+            acc = str(row["account"])
+            total = float(row["total"] or 0.0)
+            sub_income.setdefault(d, {}).setdefault(acc, 0.0)
+            sub_income[d][acc] += total
+
+        sub_spend: Dict[str, float] = {"praise": 0.0, "alpha": 0.0}
+        for row in subaccount_expenses:
+            acc = str(row["account"])
+            if acc in sub_spend:
+                sub_spend[acc] += float(row["total"] or 0.0)
+
+        dates = sorted(sub_income.keys())
+        row_h = int(20 * scale)
+        y = sub_table_y0 + header_h + int(8 * scale)
+
+        if not dates:
+            draw.text((sub_table_x0 + int(8 * scale), y), "Нет данных", font=font_small, fill=color_muted2)
+            y += row_h
+        else:
+            for i, d in enumerate(dates):
+                if y + row_h > sub_table_y1 - row_h:
+                    break
+                if i % 2 == 0:
+                    draw.rounded_rectangle((sub_table_x0, y - int(2 * scale), sub_table_x1, y + row_h - int(2 * scale)), radius=int(8 * scale), fill=(248, 250, 253))
+                draw.text((sub_table_x0 + int(8 * scale), y), d.strftime("%d.%m"), font=font_small, fill=color_text)
+                draw.text((sub_table_x0 + col_date_w + int(8 * scale), y), fmt_money(sub_income[d].get("praise", 0.0)), font=font_small, fill=color_text)
+                draw.text((sub_table_x0 + col_date_w + col_w + int(8 * scale), y), fmt_money(sub_income[d].get("alpha", 0.0)), font=font_small, fill=color_text)
+                y += row_h
+
+        if y + row_h <= sub_table_y1:
+            draw.line((sub_table_x0, y, sub_table_x1, y), fill=color_stroke, width=max(1, int(1 * scale)))
+            draw.text((sub_table_x0 + int(8 * scale), y + int(2 * scale)), "Расходы", font=font_small, fill=color_muted)
+            draw.text((sub_table_x0 + col_date_w + int(8 * scale), y + int(2 * scale)), fmt_money(sub_spend["praise"]), font=font_small, fill=color_danger)
+            draw.text((sub_table_x0 + col_date_w + col_w + int(8 * scale), y + int(2 * scale)), fmt_money(sub_spend["alpha"]), font=font_small, fill=color_danger)
+            y += row_h
+
+        if y + row_h <= sub_table_y1:
+            sub_balances = summary.get("subaccounts") if isinstance(summary, dict) else {}
+            praise_balance = float((sub_balances or {}).get("praise", {}).get("balance") or 0.0)
+            alpha_balance = float((sub_balances or {}).get("alpha", {}).get("balance") or 0.0)
+            draw.line((sub_table_x0, y, sub_table_x1, y), fill=color_stroke, width=max(1, int(1 * scale)))
+            draw.text((sub_table_x0 + int(8 * scale), y + int(2 * scale)), "Остаток", font=font_small, fill=color_muted)
+            draw.text(
+                (sub_table_x0 + col_date_w + int(8 * scale), y + int(2 * scale)),
+                fmt_money(praise_balance),
+                font=font_small,
+                fill=(color_accent if praise_balance >= 0 else color_danger),
+            )
+            draw.text(
+                (sub_table_x0 + col_date_w + col_w + int(8 * scale), y + int(2 * scale)),
+                fmt_money(alpha_balance),
+                font=font_small,
+                fill=(color_accent if alpha_balance >= 0 else color_danger),
+            )
+
+    # --- ALL EXPENSES LIST ---
+    list_card_y = section_y + top_h + gap
+    list_card = (margin, list_card_y, w - margin, list_card_y + list_card_h)
+    draw_card(bg, list_card, radius, color_card, shadow_alpha=38, shadow_blur=int(18 * scale), shadow_offset=(0, int(10 * scale)))
+    draw.text((margin + int(18 * scale), list_card_y + int(16 * scale)), "Все расходы", font=font_section, fill=color_text)
+
+    def truncate_text(text: str, max_width: int, font: Any) -> str:
+        if text_bbox(draw, text, font)[0] <= max_width:
+            return text
+        ellipsis = "…"
+        for i in range(len(text), 0, -1):
+            candidate = text[:i] + ellipsis
+            if text_bbox(draw, candidate, font)[0] <= max_width:
+                return candidate
+        return ellipsis
+
+    expense_items: List[str] = []
+    for row in expenses:
+        try:
+            date = dt.date.fromisoformat(str(row["expense_date"])).strftime("%d.%m")
+        except Exception:
+            date = "—"
+        category = str(row["category"] or "—")
+        title2 = str(row["title"] or "—")
+        total2 = fmt_money(float(row["total"] or 0.0))
+        expense_items.append(f"{date} • {category}: {title2} — {total2}")
+
+    list_x0 = margin + int(18 * scale)
+    list_x1 = w - margin - int(18 * scale)
+    list_y0 = list_card_y + int(52 * scale)
+    list_y1 = list_card[3] - int(16 * scale)
+    list_header_h = int(22 * scale)
+
+    draw.rounded_rectangle((list_x0, list_y0, list_x1, list_y0 + list_header_h), radius=int(10 * scale), fill=color_card2)
+    draw.text((list_x0 + int(10 * scale), list_y0 + int(3 * scale)), "Дата • Категория • Описание • Сумма", font=font_small, fill=color_muted)
+
+    if not expense_items:
+        draw.text((list_x0 + int(10 * scale), list_y0 + list_header_h + int(10 * scale)), "Нет расходов", font=font_small, fill=color_muted2)
+    else:
+        line_h = int(18 * scale)
+        list_area_h = list_y1 - list_y0 - list_header_h - int(8 * scale)
+        max_lines = max(int(list_area_h / line_h), 1)
+        columns = max(1, math.ceil(len(expense_items) / max_lines))
+        column_w = (list_x1 - list_x0) / columns
+
+        for col in range(columns):
+            col_x = list_x0 + col * column_w
+            if col > 0:
+                draw.line((col_x, list_y0 + list_header_h, col_x, list_y1), fill=color_stroke, width=max(1, int(1 * scale)))
+
+            for row_idx in range(max_lines):
+                item_idx = col * max_lines + row_idx
+                if item_idx >= len(expense_items):
+                    break
+                y = list_y0 + list_header_h + int(8 * scale) + row_idx * line_h
+
+                # легкая "зебра"
+                if row_idx % 2 == 0:
+                    draw.rectangle((col_x + int(4 * scale), y - int(2 * scale), col_x + column_w - int(4 * scale), y + line_h - int(2 * scale)), fill=(248, 250, 253))
+
+                text = truncate_text(expense_items[item_idx], int(column_w - int(16 * scale)), font_small)
+                draw.text((col_x + int(8 * scale), y), text, font=font_small, fill=color_text)
+
+    # footer
+    tz = CFG.tzinfo()
+    now = dt.datetime.now(tz)
+    tz_name = now.tzname() or CFG.TZ
+    footer_text = f"Сформировано: {now.strftime('%d.%m.%Y %H:%M')} ({tz_name})"
+    draw.text((margin, h - footer_h), footer_text, font=font_small, fill=color_muted2)
+
+    out = io.BytesIO()
+    bg_rgb = bg.convert("RGB")
+    bg_rgb.save(out, format="PNG", optimize=True, compress_level=6, dpi=(int(dpi), int(dpi)))
+    return out.getvalue()
+
+
+
+def build_month_report_png(
+    month_id: int,
+    preset: str = "landscape",
+    pixel_ratio: int = 2,
+    dpi: int = 192,
+) -> Tuple[bytes, str, sqlite3.Row]:
+    if preset not in PNG_PRESETS:
+        raise HTTPException(status_code=400, detail="Invalid preset")
+
+    m = get_month_by_id(month_id)
+    summary = compute_month_summary(month_id, ensure_tithe=True)
+
+    services = db_fetchall(
+        "SELECT * FROM services WHERE month_id=? AND account='main' ORDER BY service_date ASC;",
+        (month_id,),
+    )
+
+    rows = db_fetchall(
+        """
+        SELECT category, COALESCE(SUM(total),0) AS s
+        FROM expenses
+        WHERE month_id=? AND account='main'
+        GROUP BY category
+        ORDER BY s DESC, category ASC;
+        """,
+        (month_id,),
+    )
+
+    top_entries = [{"category": str(r["category"] or "—"), "sum": round(float(r["s"]), 2)} for r in rows[:5]]
+    sum_top = sum(item["sum"] for item in top_entries)
+    while len(top_entries) < 5:
+        top_entries.append({"category": "—", "sum": 0.0})
+    other_sum = max(float(summary["month_expenses_sum"]) - sum_top, 0.0)
+    top_entries.append({"category": "Другое", "sum": round(other_sum, 2)})
+
+    expenses = db_fetchall(
+        """
+        SELECT expense_date, category, title, total, account
+        FROM expenses
+        WHERE month_id=? AND account='main'
+        ORDER BY expense_date ASC, id ASC;
+        """,
+        (month_id,),
+    )
+
+    sub_services = db_fetchall(
+        """
+        SELECT service_date, total, account
+        FROM services
+        WHERE month_id=? AND account!='main'
+        ORDER BY service_date ASC;
+        """,
+        (month_id,),
+    )
+
+    sub_expenses = db_fetchall(
+        """
+        SELECT expense_date, total, account
+        FROM expenses
+        WHERE month_id=? AND account!='main'
+        ORDER BY expense_date ASC, id ASC;
+        """,
+        (month_id,),
+    )
+
+    png_data = render_month_report_png(
+        m, summary, services, top_entries, expenses, sub_services, sub_expenses,
+        preset,
+        pixel_ratio=pixel_ratio,
+        dpi=dpi,
+    )
+    filename = f"report_{m['year']}_{int(m['month']):02d}_{preset}@{int(pixel_ratio)}x.png"
+    return png_data, filename, m
+
+
+@APP.get("/api/export/png")
+def export_png(
+    month_id: int = Query(...),
+    preset: str = Query("landscape"),
+    pixel_ratio: int = Query(2, ge=1, le=4, description="Плотность пикселей (1..4). 2 = Retina"),
+    dpi: int = Query(192, ge=72, le=600, description="DPI метаданные (72..600). На экране важнее pixel_ratio"),
+    u: sqlite3.Row = Depends(require_role("admin", "accountant", "viewer")),
+):
+    png_data, filename, _ = build_month_report_png(month_id, preset=preset, pixel_ratio=pixel_ratio, dpi=dpi)
+    return Response(
+        content=png_data,
+        media_type="image/png",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 @APP.get("/api/export/csv")
 def export_csv(
@@ -5667,6 +6048,7 @@ def export_excel(
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
+
 # ---------------------------
 # Run (local)
 # ---------------------------
@@ -5675,7 +6057,7 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(
-        APP,
+        "app:APP",
         host="0.0.0.0",
         port=int(os.getenv("PORT", "8000")),
         reload=False,
