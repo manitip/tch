@@ -1351,23 +1351,6 @@ def list_report_recipients(settings_row: Optional[sqlite3.Row] = None) -> List[i
             tuple(selected),
         )
         ids.update(int(r["telegram_id"]) for r in rows)
-        return sorted(ids)
-
-    # Backward compatibility: if explicit selection is empty, use all active users from allowlist.
-    allow = refresh_allowlist_if_needed()
-    allowed_ids = {tid for tid, u in allow.items() if u.get("active") is True}
-    if allowed_ids:
-        placeholders = ",".join("?" for _ in allowed_ids)
-        rows = db_fetchall(
-            f"""
-            SELECT telegram_id
-            FROM bot_subscribers
-            WHERE active=1
-              AND telegram_id IN ({placeholders});
-            """,
-            tuple(allowed_ids),
-        )
-        ids.update(int(r["telegram_id"]) for r in rows)
     return sorted(ids)
 # ---------------------------
 # Session token (HMAC signed JSON) - self-contained (no external JWT deps)
@@ -4850,7 +4833,21 @@ async def api_update_settings(
         params.append(report_chat_id)
 
     if body.report_recipient_ids is not None:
-        recipient_ids = sorted({int(x) for x in body.report_recipient_ids})
+        requested_ids = sorted({int(x) for x in body.report_recipient_ids})
+        allow = refresh_allowlist_if_needed()
+        allowed_active_ids = {
+            int(tid)
+            for tid, user in allow.items()
+            if bool(user.get("active", True))
+        }
+        invalid_ids = [tid for tid in requested_ids if tid not in allowed_active_ids]
+        if invalid_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown or inactive report recipients: {', '.join(str(x) for x in invalid_ids)}",
+            )
+
+        recipient_ids = requested_ids
         fields.append("report_recipient_ids_json=?")
         params.append(json.dumps(recipient_ids, ensure_ascii=False))
 
