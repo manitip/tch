@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Молитвенная поддержка</title>
+  <style>
+    :root{
+      --bg:#070b14;
+      --bg-soft:#0f1728;
+      --card:#131f35;
+      --card-hover:#192944;
+      --text:#edf2ff;
+      --muted:#b6c1da;
+      --line:rgba(175,198,255,.2);
+      --brand:#40d9c8;
+      --brand-2:#7f8cff;
+      --shadow:0 12px 34px rgba(0,0,0,.34);
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0;
+      font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+      background:radial-gradient(1200px 500px at 50% -5%,#1b2f51 0%,var(--bg) 65%);
+      color:var(--text);
+      line-height:1.5;
+    }
+    .container{max-width:1040px;margin:0 auto;padding:18px 18px 52px}
+    .topbar{display:flex;justify-content:space-between;align-items:center;gap:14px;padding:10px 0 24px}
+    .logo{font-weight:800;letter-spacing:.2px}
+    .logo span{color:var(--brand)}
+    .nav{display:flex;gap:10px;flex-wrap:wrap}
+    .nav a{padding:8px 14px;border:1px solid var(--line);border-radius:999px;text-decoration:none;color:var(--text);background:rgba(255,255,255,.03)}
+    .hero{padding:32px;border:1px solid var(--line);background:linear-gradient(135deg,rgba(66,217,200,.14),rgba(127,140,255,.1));border-radius:24px;box-shadow:var(--shadow)}
+    h1{font-size:clamp(28px,5vw,50px);line-height:1.14;margin:0 0 16px}
+    .sub{font-size:clamp(17px,2vw,21px);color:var(--muted);max-width:840px;margin:0 0 22px}
+    .cta{display:flex;gap:12px;flex-wrap:wrap}
+    .btn{padding:12px 18px;border-radius:12px;border:0;font-weight:700;cursor:pointer}
+    .btn-primary{background:linear-gradient(90deg,var(--brand),#5ff7d8);color:#062b2b}
+    .btn-secondary{background:#222f4e;color:var(--text);border:1px solid var(--line)}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin-top:26px}
+    .card{padding:16px;border:1px solid var(--line);border-radius:16px;background:var(--card)}
+    .card:hover{background:var(--card-hover)}
+    .card h3{margin:0 0 6px;font-size:20px}
+    .card p{margin:0;color:var(--muted)}
+    .section{margin-top:30px}
+    .section h2{font-size:34px;margin:0 0 12px}
+    .topics{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}
+    .topic{padding:16px;border-radius:16px;background:rgba(255,255,255,.03);border:1px solid var(--line)}
+    .topic b{display:block;font-size:18px;margin-bottom:6px}
+    .help{margin-top:20px;padding:16px;border-radius:14px;border:1px solid rgba(255,130,130,.35);background:rgba(255,130,130,.09);color:#ffdcdc}
+    footer{margin-top:36px;padding-top:18px;border-top:1px solid var(--line);color:var(--muted);display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header class="topbar">
+      <div class="logo">Молитвенная <span>поддержка</span></div>
+      <nav class="nav">
+        <a href="#request">Попросить молитву</a>
+        <a href="#how">Как это работает</a>
+        <a href="#contacts">Контакты</a>
+      </nav>
+    </header>
+
+    <section class="hero" id="request">
+      <h1>Можно попросить молитву — спокойно, бережно и без лишних вопросов.</h1>
+      <p class="sub">Опишите ситуацию так, как можете. Можно анонимно. Если захотите — оставьте email, чтобы получить подтверждение.</p>
+      <div class="cta">
+        <button class="btn btn-primary">Оставить просьбу</button>
+        <button class="btn btn-secondary">Узнать подробнее</button>
+      </div>
+      <div class="grid" id="how">
+        <article class="card"><h3>Можно анонимно</h3><p>Без имени и контактов — если так спокойнее.</p></article>
+        <article class="card"><h3>Ничего не публикуем</h3><p>История остаётся приватной и бережно хранится.</p></article>
+        <article class="card"><h3>Минимум полей</h3><p>Только то, что действительно нужно для поддержки.</p></article>
+        <article class="card"><h3>Коротко и понятно</h3><p>Мы принимаем запросы быстро и с уважением к вашим чувствам.</p></article>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>О чём можно попросить</h2>
+      <div class="topics">
+        <div class="topic"><b>Здоровье</b>Когда страшно и хочется поддержки.</div>
+        <div class="topic"><b>Семья</b>Отношения, дети, близкие.</div>
+        <div class="topic"><b>Тревога</b>Внутреннее напряжение, паника, бессонница.</div>
+        <div class="topic"><b>Работа</b>Потеря, неопределённость, выгорание.</div>
+        <div class="topic"><b>Утрата</b>Горе, прощание, тяжёлые новости.</div>
+        <div class="topic"><b>Зависимости</b>Борьба, срывы, восстановление.</div>
+      </div>
+      <div class="help">Если вы в опасности или нужна срочная помощь — обратитесь в местные экстренные службы.</div>
+    </section>
+
+    <footer id="contacts">
+      <span>© 2026 Молитвенная поддержка</span>
+      <span>Политика · Контакты · Админка</span>
+    </footer>
+  </div>
+</body>
+</html>
