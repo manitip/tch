@@ -37,6 +37,17 @@ class CreateEntryResponse(BaseModel):
     item: EntryOut
 
 
+@app.get("/", response_class=HTMLResponse)
+def landing_page():
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(base_dir, "prayer_support.html")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        raise HTTPException(status_code=500, detail="prayer_support.html not found рядом с server.py")
+
+
 @app.get("/webapp", response_class=HTMLResponse)
 def webapp_page():
     base_dir = os.path.dirname(os.path.abspath(__file__))
